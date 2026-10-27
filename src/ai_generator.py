@@ -1,10 +1,11 @@
 """
 Gerador Multimodal de Ilustrações de Libras
-Prioridade #1: Google Gemini API (Google AI Studio - Nano Banana 2 / Gemini Image Generation / Imagen 3)
+Prioridade #1: Google Gemini API (Google AI Studio)
 Fallback Gratuito: Pollinations.ai (Flux)
 """
 import os
 import io
+import re
 import base64
 import urllib.parse
 import requests
@@ -13,7 +14,6 @@ from PIL import Image
 
 
 class SmartAIRouter:
-    """Gerencia o status e a prioridade dos provedores com Google Gemini em 1º lugar"""
     def __init__(self, config: dict = None):
         self.config = config or {}
 
@@ -25,7 +25,7 @@ class SmartAIRouter:
 
         return {
             "gemini": {
-                "name": "1️⃣ Google Gemini API (Nano Banana 2 / AI Studio)",
+                "name": "1️⃣ Google Gemini API (Google AI Studio)",
                 "ready": bool(gemini_key),
                 "requires_key": True
             },
@@ -58,7 +58,6 @@ class AIGenerator:
         self.config = config or {}
 
     def _encode_image_b64(self, image_path: str) -> tuple:
-        """Converte imagem local para Base64 redimensionada para envio rápido à API do Gemini"""
         with Image.open(image_path) as img:
             img = img.convert("RGB")
             img.thumbnail((1024, 1024))
@@ -75,13 +74,9 @@ class AIGenerator:
         output_dir: str = "output",
         nome_arquivo: str = "sinal_gerado.png"
     ) -> tuple:
-        """
-        Retorna (sucesso: bool, mensagem: str, caminho_saida: str)
-        """
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         caminho_saida = str(Path(output_dir) / nome_arquivo)
 
-        # Ordem de prioridade padrão: Google Gemini em 1º lugar!
         ordem = self.config.get(
             "priority_order",
             ["gemini", "huggingface", "openai", "replicate", "pollinations"]
@@ -129,13 +124,8 @@ class AIGenerator:
         return False, resumo_erros, None
 
     def _gerar_com_gemini(self, api_key: str, prompt: str, img_ref: str, img_char: str, caminho_saida: str) -> tuple:
-        """
-        Usa a API do Google AI Studio tentando os modelos de geração nativa de imagens do Gemini
-        (Nano Banana 2 / gemini-2.5-flash-image-preview / gemini-2.0-flash-exp-image-generation / Imagen 3).
-        """
         partes = []
 
-        # Anexar Imagem A (Referência do Capovilla) e Imagem B (Personagem)
         if img_ref and os.path.exists(img_ref):
             b64_ref, mime_ref = self._encode_image_b64(img_ref)
             partes.append({"inlineData": {"mimeType": mime_ref, "data": b64_ref}})
@@ -153,7 +143,6 @@ class AIGenerator:
         )
         partes.append({"text": instrucao_multimodal})
 
-        # Lista de modelos de imagem do Google AI Studio (do mais novo Nano Banana 2 aos fallbacks oficiais)
         modelos_gemini_img = [
             "gemini-2.5-flash-image-preview",
             "gemini-2.0-flash-preview-image-generation",
@@ -189,7 +178,6 @@ class AIGenerator:
             except Exception as e:
                 ultimo_erro = str(e)
 
-        # Fallback para Imagen 3 na mesma chave do Google AI Studio caso os modelos Flash Image estejam indisponíveis na região
         url_imagen = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key={api_key}"
         try:
             resp_img = requests.post(
@@ -212,21 +200,12 @@ class AIGenerator:
 
         return False, ultimo_erro or "A chave Gemini informada não retornou imagem."
 
- def _gerar_com_pollinations(self, prompt: str, caminho_saida: str) -> tuple:
-        """
-        Geração via Pollinations.ai com limpeza de caracteres e fallback robusto
-        """
-        import re
-        import urllib.parse
-        
-        # Limpar quebras de linha e caracteres complexos para evitar erro 400/414
+    def _gerar_com_pollinations(self, prompt: str, caminho_saida: str) -> tuple:
         prompt_sanitizado = re.sub(r'[^a-zA-Z0-9\s,.-]', '', prompt)
         resumo = " ".join(prompt_sanitizado.split())[:300]
-        
         texto_final = f"2D vector flat illustration Brazilian sign language Libras character: {resumo}"
         prompt_encoded = urllib.parse.quote(texto_final)
 
-        # Chave configurada
         pollinations_key = self.config.get("pollinations_key") or os.getenv("POLLINATIONS_API_KEY")
         if not pollinations_key:
             try:
@@ -236,9 +215,7 @@ class AIGenerator:
             except Exception:
                 pass
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         if pollinations_key:
             headers["Authorization"] = f"Bearer {pollinations_key}"
 
@@ -258,6 +235,19 @@ class AIGenerator:
                 continue
 
         return False, "Pollinations indisponível de momento."
+
+    def _gerar_com_huggingface(self, token: str, prompt: str, caminho_saida: str) -> tuple:
+        url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            resp = requests.post(url, headers=headers, json={"inputs": prompt[:800]}, timeout=60)
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                with open(caminho_saida, "wb") as f:
+                    f.write(resp.content)
+                return True, "Gerado via HuggingFace (FLUX.1-schnell)"
+            return False, f"HTTP {resp.status_code}: {resp.text[:120]}"
+        except Exception as e:
+            return False, str(e)
 
     def _gerar_com_openai(self, api_key: str, prompt: str, caminho_saida: str) -> tuple:
         url = "https://api.openai.com/v1/images/generations"
