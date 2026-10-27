@@ -1,0 +1,9 @@
+# Configuração para Streamlit Community Cloud
+# Este arquivo instrui o Streamlit sobre como executar a aplicação
+
+[server]
+headless = true
+port = 8501
+
+[browser]
+gatherUsageStats = false

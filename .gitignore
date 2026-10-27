@@ -1,0 +1,36 @@
+# Arquivos Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Dados sensíveis
+.env
+*.key
+
+# Saídas temporárias
+output/*.png
+output/*.jpg
+assets/referencias/temp_*
+assets/personagens/temp_*
+
+# PDFs pesados (não versionar - usar Google Drive)
+data/pdfs/
+*.pdf
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Catálogo (comentar se quiser versionar)
+# data/catalog.json

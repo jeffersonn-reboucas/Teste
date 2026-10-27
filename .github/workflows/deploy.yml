@@ -1,0 +1,14 @@
+name: Deploy to Streamlit Cloud
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Streamlit Cloud deployment
+        run: echo "Streamlit Cloud will auto-deploy from main branch"

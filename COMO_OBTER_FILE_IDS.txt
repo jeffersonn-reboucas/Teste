@@ -1,0 +1,73 @@
+"""
+INSTRUÇÕES PARA OBTER FILE IDs DO GOOGLE DRIVE
+================================================
+
+Depois de fazer upload dos PDFs para a pasta compartilhada do Google Drive,
+siga estes passos para obter os File IDs:
+
+1. Acesse: https://drive.google.com/drive/folders/1GyE1k4Qb5Of2mAhIIYMaD3TOaJnLSB1-
+
+2. Para cada arquivo (Dicionario capovilla completo.pdf e configuraçao de mao.pdf):
+   a) Clique com botão direito no arquivo
+   b) Selecione "Compartilhar"
+   c) Clique em "Alterar" (próximo a "Restrito")
+   d) Selecione "Qualquer pessoa com o link"
+   e) Clique em "Concluído"
+
+3. Clique com botão direito no arquivo novamente e selecione "Obter link"
+
+4. A URL terá o formato:
+   https://drive.google.com/file/d/1ABC123xyz789DEF456/view?usp=sharing
+
+5. O FILE_ID é a parte entre /d/ e /view:
+   No exemplo acima: 1ABC123xyz789DEF456
+
+6. Anote os FILE_IDs:
+
+   Dicionario capovilla completo.pdf: ____________________________________
+
+   configuraçao de mao.pdf: ____________________________________
+
+7. ONDE USAR OS FILE_IDs:
+
+   A) Para Streamlit Cloud:
+      - Vá em App Settings → Secrets
+      - Adicione:
+        [gdrive]
+        capovilla_file_id = "COLE_O_FILE_ID_AQUI"
+        config_mao_file_id = "COLE_O_FILE_ID_AQUI"
+
+   B) Para código local (opcional):
+      - Edite src/pdf_manager.py
+      - Linha ~15, adicione os file_ids:
+        GOOGLE_DRIVE_FILES = {
+            "Dicionario capovilla completo.pdf": {
+                "file_id": "COLE_AQUI",
+                ...
+            },
+            ...
+        }
+
+8. TESTAR O LINK:
+   Abra no navegador:
+   https://drive.google.com/uc?id=SEU_FILE_ID_AQUI
+
+   Se baixar o arquivo = configurado corretamente ✅
+   Se dar erro 403/404 = problema no compartilhamento ❌
+
+9. IMPORTANTE:
+   - O compartilhamento deve estar como "Qualquer pessoa com o link"
+   - Não use links de visualização (preview), use links de download
+   - Aguarde ~5 minutos após configurar o compartilhamento para propagar
+
+10. PROBLEMAS COMUNS:
+
+    Erro: "Access denied"
+    Solução: Verifique o compartilhamento público
+
+    Erro: "File not found"
+    Solução: Confirme o FILE_ID correto
+
+    Download muito lento:
+    Solução: Normal para arquivos grandes (212 MB)
+"""
