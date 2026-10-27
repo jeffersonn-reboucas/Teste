@@ -8,6 +8,29 @@ env/
 venv/
 ENV/
 
+# Ambientes virtuais
+venv/
+env/
+.venv/
+
+# Arquivos de configuração secretos
+.env
+.streamlit/secrets.toml
+
+# Bancos de dados locais
+data/*.db
+*.sqlite3
+
+# Imagens geradas e temporárias
+output/
+assets/referencias/
+assets/personagens/
+
+# Arquivos do sistema
+__pycache__/
+*.pyc
+.DS_Store
+
 # IDEs
 .vscode/
 .idea/

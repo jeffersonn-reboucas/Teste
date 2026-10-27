@@ -10,7 +10,71 @@ import urllib.parse
 import requests
 from pathlib import Path
 from PIL import Image
+import replicate
+import base64
 
+# Dentro do seu app.py ou ai_generator.py:
+prompt_instant = st.session_state.prompt_engine.gerar_prompt_instant_character(
+    termo=termo,
+    configuracao_mao=configuracoes,
+    ponto_articulacao=ponto_articulacao,
+    movimento=movimentos,
+    orientacao=orientacao,
+    expressao=expressoes,
+    observacoes=observacoes
+)
+
+# E então enviar 'prompt_instant' para o Replicate (InstantCharacter)
+
+# ... (dentro da classe AIGenerator) ...
+
+    def _gerar_com_replicate(
+        self, 
+        api_key: str, 
+        prompt: str, 
+        img_ref: str, 
+        img_char: str, 
+        caminho_saida: str
+    ) -> tuple:
+        """
+        Gera a imagem usando o InstantCharacter via Replicate.
+        Ele mantém a identidade do personagem (Item B) e aplica a pose do sinal (Item A).
+        """
+        os.environ["REPLICATE_API_TOKEN"] = api_key
+        
+        try:
+            # Abre as imagens para enviar para a API
+            with open(img_ref, "rb") as f_ref, open(img_char, "rb") as f_char:
+                output = replicate.run(
+                    # Modelo InstantCharacter no Replicate (versão mais recente)
+                    "bytedance/instant-character:latest", 
+                    input={
+                        "prompt": prompt,
+                        "subject_image": f_char,       # Item B: O seu personagem base
+                        "control_image": f_ref,        # Item A: O sinal de Libras de referência
+                        "width": 1024,
+                        "height": 1024,
+                        "num_inference_steps": 30
+                    }
+                )
+
+            # O Replicate retorna uma URL da imagem gerada
+            if isinstance(output, list) and len(output) > 0:
+                img_url = output[0]
+            else:
+                img_url = output
+
+            # Baixa a imagem gerada para o seu computador
+            resp = requests.get(img_url, timeout=30)
+            if resp.status_code == 200:
+                with open(caminho_saida, "wb") as f:
+                    f.write(resp.content)
+                return True, "Gerado via InstantCharacter (Replicate)"
+                
+            return False, "Falha ao baixar imagem do Replicate."
+
+        except Exception as e:
+            return False, f"Erro no Replicate: {str(e)[:100]}"
 
 class SmartAIRouter:
     def __init__(self, config: dict = None):
@@ -163,13 +227,16 @@ class AIGenerator:
                     return True, msg, caminho_saida
                 erros_acumulados.append(f"Gemini: {msg}")
 
-            elif prov == "pollinations":
-                ok, msg = self._gerar_com_pollinations(
-                    prompt, imagem_referencia_a, imagem_personagem_b, caminho_saida
+                        elif prov == "replicate":
+                key = self.config.get("replicate_key") or os.getenv("REPLICATE_API_TOKEN")
+                if not key:
+                    continue
+                ok, msg = self._gerar_com_replicate(
+                    key, prompt, imagem_referencia_a, imagem_personagem_b, caminho_saida
                 )
                 if ok:
                     return True, msg, caminho_saida
-                erros_acumulados.append(f"Pollinations: {msg}")
+                erros_acumulados.append(f"Replicate: {msg}")
 
             elif prov == "huggingface":
                 key = self.config.get("huggingface_key") or os.getenv("HUGGINGFACE_TOKEN")
