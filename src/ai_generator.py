@@ -124,87 +124,53 @@ class AIGenerator:
         return False, resumo_erros, None
 
     def _gerar_com_gemini(self, api_key: str, prompt: str, img_ref: str, img_char: str, caminho_saida: str) -> tuple:
-        partes = []
-
-        if img_ref and os.path.exists(img_ref):
-            b64_ref, mime_ref = self._encode_image_b64(img_ref)
-            partes.append({"inlineData": {"mimeType": mime_ref, "data": b64_ref}})
-
-        if img_char and os.path.exists(img_char):
-            b64_char, mime_char = self._encode_image_b64(img_char)
-            partes.append({"inlineData": {"mimeType": mime_char, "data": b64_char}})
-
-        instrucao_multimodal = (
-            "Generate a high-quality 2D pedagogical illustration for Brazilian Sign Language (Libras). "
-            "Use the SECOND attached image as the exact character model (keep the same face, hair, clothes, and 2D vector style). "
-            "Use the FIRST attached image (dictionary technical drawing) and the following description to position the character's hands, "
-            "fingers, and facial expression accurately executing the sign. Clean white background, didactic flashcards style.\n\n"
-            f"Sign Details:\n{prompt}"
+        """
+        Gera ilustração via Google AI Studio usando Imagen 3 oficial.
+        """
+        instrucao_completa = (
+            "2D vector didactic illustration for Brazilian Sign Language (Libras), "
+            "clean white background, flat color, clear handshape and arm articulation. "
+            f"Details: {prompt[:800]}"
         )
-        partes.append({"text": instrucao_multimodal})
 
-        modelos_gemini_img = [
-            "gemini-2.5-flash-image-preview",
-            "gemini-2.0-flash-preview-image-generation",
-            "gemini-2.0-flash-exp-image-generation",
-            "gemini-2.0-flash-exp"
-        ]
-
-        ultimo_erro = ""
-
-        for modelo in modelos_gemini_img:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={api_key}"
-            payload = {
-                "contents": [{"parts": partes}],
-                "generationConfig": {
-                    "responseModalities": ["TEXT", "IMAGE"]
-                }
-            }
-            try:
-                resp = requests.post(url, json=payload, timeout=60)
-                if resp.status_code == 200:
-                    dados = resp.json()
-                    candidatos = dados.get("candidates", [])
-                    for cand in candidatos:
-                        for part in cand.get("content", {}).get("parts", []):
-                            if "inlineData" in part and "data" in part["inlineData"]:
-                                img_bytes = base64.b64decode(part["inlineData"]["data"])
-                                with open(caminho_saida, "wb") as f:
-                                    f.write(img_bytes)
-                                return True, f"Gerado via Google Gemini ({modelo})"
-                else:
-                    msg_api = resp.json().get("error", {}).get("message", f"HTTP {resp.status_code}")
-                    ultimo_erro = f"{modelo}: {msg_api}"
-            except Exception as e:
-                ultimo_erro = str(e)
-
+        # 1. Tentativa com Imagen 3 oficial da Google
         url_imagen = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key={api_key}"
+        payload_imagen = {
+            "instances": [{"prompt": instrucao_completa}],
+            "parameters": {
+                "sampleCount": 1,
+                "aspectRatio": "1:1",
+                "outputOptions": {"mimeType": "image/png"}
+            }
+        }
+
         try:
-            resp_img = requests.post(
-                url_imagen,
-                json={
-                    "instances": [{"prompt": instrucao_multimodal[:900]}],
-                    "parameters": {"sampleCount": 1}
-                },
-                timeout=60
-            )
-            if resp_img.status_code == 200:
-                preds = resp_img.json().get("predictions", [])
+            resp = requests.post(url_imagen, json=payload_imagen, timeout=60)
+            if resp.status_code == 200:
+                dados = resp.json()
+                preds = dados.get("predictions", [])
                 if preds and "bytesBase64Encoded" in preds[0]:
                     img_bytes = base64.b64decode(preds[0]["bytesBase64Encoded"])
                     with open(caminho_saida, "wb") as f:
                         f.write(img_bytes)
-                    return True, "Gerado via Google Gemini (Imagen 3)"
-        except Exception:
-            pass
-
-        return False, ultimo_erro or "A chave Gemini informada não retornou imagem."
+                    return True, "Gerado via Google Imagen 3 (Google AI Studio)"
+            
+            # Se a conta não tiver cota de imagem habilitada no Imagen 3
+            msg_erro = resp.json().get("error", {}).get("message", f"HTTP {resp.status_code}")
+            return False, f"Imagen 3: {msg_erro}"
+        except Exception as e:
+            return False, f"Erro na conexão Gemini: {str(e)}"
 
     def _gerar_com_pollinations(self, prompt: str, caminho_saida: str) -> tuple:
-        prompt_sanitizado = re.sub(r'[^a-zA-Z0-9\s,.-]', '', prompt)
-        resumo = " ".join(prompt_sanitizado.split())[:300]
-        texto_final = f"2D vector flat illustration Brazilian sign language Libras character: {resumo}"
-        prompt_encoded = urllib.parse.quote(texto_final)
+        """
+        Geração via Pollinations.ai com tratamento de query e múltiplos endpoints.
+        """
+        # Sanitização: remove caracteres não-ASCII e pontuações complexas
+        prompt_limpo = re.sub(r'[^a-zA-Z0-9\s,]', ' ', prompt)
+        resumo = " ".join(prompt_limpo.split())[:200]
+        
+        texto_final = f"vector flat illustration Libras sign language pose didactic character, {resumo}"
+        prompt_encoded = urllib.parse.quote_plus(texto_final)
 
         pollinations_key = self.config.get("pollinations_key") or os.getenv("POLLINATIONS_API_KEY")
         if not pollinations_key:
@@ -215,39 +181,29 @@ class AIGenerator:
             except Exception:
                 pass
 
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
         if pollinations_key:
             headers["Authorization"] = f"Bearer {pollinations_key}"
 
-        urls = [
-            f"https://image.pollinations.ai/prompt/{prompt_encoded}?width=768&height=768&model=flux&nologo=true&seed=42",
-            f"https://image.pollinations.ai/prompt/{prompt_encoded}?model=turbo&nologo=true"
+        tentativas = [
+            f"https://image.pollinations.ai/prompt/{prompt_encoded}?model=flux&width=512&height=512&nologo=true&seed=42",
+            f"https://image.pollinations.ai/prompt/{prompt_encoded}?model=turbo&width=512&height=512&nologo=true",
+            f"https://pollinations.ai/p/{prompt_encoded}?width=512&height=512"
         ]
 
-        for url in urls:
+        for url in tentativas:
             try:
-                r = requests.get(url, headers=headers, timeout=50)
-                if r.status_code == 200 and len(r.content) > 2000:
+                r = requests.get(url, headers=headers, timeout=40)
+                if r.status_code == 200 and len(r.content) > 1500:
                     with open(caminho_saida, "wb") as f:
                         f.write(r.content)
                     return True, "Gerado com sucesso via Pollinations.ai"
             except Exception:
                 continue
 
-        return False, "Pollinations indisponível de momento."
-
-    def _gerar_com_huggingface(self, token: str, prompt: str, caminho_saida: str) -> tuple:
-        url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
-        headers = {"Authorization": f"Bearer {token}"}
-        try:
-            resp = requests.post(url, headers=headers, json={"inputs": prompt[:800]}, timeout=60)
-            if resp.status_code == 200 and len(resp.content) > 1000:
-                with open(caminho_saida, "wb") as f:
-                    f.write(resp.content)
-                return True, "Gerado via HuggingFace (FLUX.1-schnell)"
-            return False, f"HTTP {resp.status_code}: {resp.text[:120]}"
-        except Exception as e:
-            return False, str(e)
+        return False, "Servidores do Pollinations temporariamente sobrecarregados."
 
     def _gerar_com_openai(self, api_key: str, prompt: str, caminho_saida: str) -> tuple:
         url = "https://api.openai.com/v1/images/generations"
