@@ -1,748 +1,276 @@
 """
-Smart AI Router - Roteador Inteligente de IA com Auto-Fallback
-Inspirado no 9Router: Unificação de múltiplos provedores + Fallback automático
-Nunca para por falta de crédito ou limite de API!
+Gerador Multimodal de Ilustrações de Libras
+Prioridade #1: Google Gemini API (Google AI Studio - Nano Banana 2 / Gemini Image Generation / Imagen 3)
+Fallback Gratuito: Pollinations.ai (Flux)
 """
 import os
+import io
 import base64
+import urllib.parse
 import requests
-from typing import Optional, Dict, Tuple, List, Any
 from pathlib import Path
-from datetime import datetime
-import json
-import time
-from abc import ABC, abstractmethod
-import streamlit as st
+from PIL import Image
 
-
-# ==============================================================================
-# UTILITÁRIOS
-# ==============================================================================
-
-def log_provider_status(provider_name: str, status: str, message: str = ""):
-    """Registra status do provider no log"""
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] {provider_name}: {status} - {message}")
-
-
-# ==============================================================================
-# CLASSE BASE ABSTRATA
-# ==============================================================================
-
-class BaseAIProvider(ABC):
-    """Classe base para todos os provedores de IA"""
-
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key
-        self.model_name = ""
-        self.requires_api_key = True
-        self.supports_vision = False
-        self.supports_generation = False
-
-    @abstractmethod
-    def analisar_imagens(
-        self,
-        prompt: str,
-        imagem_a: str,
-        imagem_b: str
-    ) -> Tuple[bool, str]:
-        """Analisa imagens e retorna descrição detalhada"""
-        pass
-
-    @abstractmethod
-    def gerar_imagem(
-        self,
-        prompt: str,
-        output_path: str,
-        imagem_init: Optional[str] = None
-    ) -> Tuple[bool, str, Optional[str]]:
-        """Gera imagem a partir do prompt"""
-        pass
-
-    def _carregar_imagem_base64(self, caminho: str) -> str:
-        """Carrega imagem e converte para base64"""
-        with open(caminho, "rb") as f:
-            return base64.b64encode(f.read()).decode('utf-8')
-
-    def _baixar_e_salvar_imagem(self, url: str, output_path: str, timeout: int = 60) -> bool:
-        """Baixa imagem de URL e salva localmente"""
-        try:
-            response = requests.get(url, timeout=timeout)
-            response.raise_for_status()
-
-            with open(output_path, 'wb') as f:
-                f.write(response.content)
-            return True
-        except Exception as e:
-            log_provider_status(self.model_name, "ERROR", f"Falha no download: {e}")
-            return False
-
-
-# ==============================================================================
-# POLLINATIONS.AI - 100% GRATUITO SEM API KEY (FALLBACK UNIVERSAL)
-# ==============================================================================
-
-class PollinationsAIProvider(BaseAIProvider):
-    """Pollinations.ai - API gratuita sem necessidade de chave"""
-
-    def __init__(self):
-        super().__init__(api_key=None)
-        self.model_name = "Pollinations.ai (Flux)"
-        self.requires_api_key = False
-        self.supports_generation = True
-        self.supports_vision = False
-        self.base_url = "https://image.pollinations.ai/prompt"
-
-    def analisar_imagens(self, prompt: str, imagem_a: str, imagem_b: str) -> Tuple[bool, str]:
-        """Pollinations não suporta análise de imagens"""
-        return False, "Pollinations.ai não suporta análise multimodal"
-
-    def gerar_imagem(
-        self,
-        prompt: str,
-        output_path: str,
-        imagem_init: Optional[str] = None
-    ) -> Tuple[bool, str, Optional[str]]:
-        try:
-            # Otimizar prompt para Pollinations
-            prompt_otimizado = f"{prompt}, 2D flat illustration, clean linework, educational sign language reference, pedagogical style, white background, centered composition"
-
-            # URL de geração (Pollinations aceita prompt direto na URL)
-            # Formato: https://image.pollinations.ai/prompt/{prompt}?width=1024&height=1024&model=flux&seed={seed}
-            import urllib.parse
-            encoded_prompt = urllib.parse.quote(prompt_otimizado[:1000])  # Limite de caracteres
-
-            url = f"{self.base_url}/{encoded_prompt}"
-            params = {
-                "width": 1024,
-                "height": 1024,
-                "model": "flux",  # Flux ou turbo
-                "seed": int(time.time())  # Seed aleatório
-            }
-
-            # Construir URL completa
-            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-            full_url = f"{url}?{query_string}"
-
-            log_provider_status(self.model_name, "GENERATING", "Gerando imagem...")
-
-            # Baixar imagem diretamente
-            if self._baixar_e_salvar_imagem(full_url, output_path, timeout=120):
-                log_provider_status(self.model_name, "SUCCESS", "Imagem gerada")
-                return True, f"Gerado com {self.model_name} (GRATUITO)", output_path
-            else:
-                return False, "Erro ao baixar imagem do Pollinations", None
-
-        except Exception as e:
-            log_provider_status(self.model_name, "ERROR", str(e))
-            return False, f"Erro no Pollinations.ai: {str(e)}", None
-
-
-# ==============================================================================
-# HUGGING FACE - API GRATUITA COM TOKEN
-# ==============================================================================
-
-class HuggingFaceProvider(BaseAIProvider):
-    """Hugging Face Inference API - Gratuito com token"""
-
-    def __init__(self, api_key: Optional[str] = None):
-        super().__init__(api_key)
-        self.model_name = "HuggingFace (FLUX.1-schnell)"
-        self.requires_api_key = True  # Mas o token é gratuito
-        self.supports_generation = True
-        self.supports_vision = False
-        self.api_url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
-
-    def analisar_imagens(self, prompt: str, imagem_a: str, imagem_b: str) -> Tuple[bool, str]:
-        """HuggingFace não suporta análise (só geração)"""
-        return False, "HuggingFace FLUX não suporta análise multimodal"
-
-    def gerar_imagem(
-        self,
-        prompt: str,
-        output_path: str,
-        imagem_init: Optional[str] = None
-    ) -> Tuple[bool, str, Optional[str]]:
-        try:
-            if not self.api_key:
-                return False, "HuggingFace token não configurado", None
-
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-
-            # Prompt otimizado
-            prompt_otimizado = f"{prompt}, high quality 2D illustration, clean lines, educational material, sign language reference, flat color style"
-
-            payload = {
-                "inputs": prompt_otimizado[:900],  # Limite do modelo
-                "parameters": {
-                    "num_inference_steps": 4,  # FLUX.1-schnell é rápido (4 steps)
-                    "guidance_scale": 0.0  # Schnell não usa guidance
-                }
-            }
-
-            log_provider_status(self.model_name, "GENERATING", "Gerando...")
-
-            response = requests.post(self.api_url, headers=headers, json=payload, timeout=120)
-
-            if response.status_code == 200:
-                # Salvar imagem
-                with open(output_path, 'wb') as f:
-                    f.write(response.content)
-
-                log_provider_status(self.model_name, "SUCCESS", "Imagem gerada")
-                return True, f"Gerado com {self.model_name} (GRATUITO)", output_path
-            else:
-                error_msg = response.text
-                log_provider_status(self.model_name, "ERROR", f"Status {response.status_code}: {error_msg}")
-                return False, f"Erro HuggingFace: {error_msg}", None
-
-        except Exception as e:
-            log_provider_status(self.model_name, "ERROR", str(e))
-            return False, f"Erro no HuggingFace: {str(e)}", None
-
-
-# ==============================================================================
-# GOOGLE GEMINI - VISÃO + GERAÇÃO
-# ==============================================================================
-
-class GoogleGeminiProvider(BaseAIProvider):
-    """Google Gemini - Visão multimodal + Imagen"""
-
-    def __init__(self, api_key: Optional[str] = None):
-        super().__init__(api_key)
-        self.model_name = "Google Gemini Flash"
-        self.requires_api_key = True
-        self.supports_vision = True
-        self.supports_generation = False  # Imagen ainda em preview
-
-        try:
-            import google.generativeai as genai
-            if self.api_key:
-                genai.configure(api_key=self.api_key)
-            self.client = genai
-        except ImportError:
-            raise ImportError("Instale: pip install google-generativeai")
-
-    def analisar_imagens(
-        self,
-        prompt: str,
-        imagem_a: str,
-        imagem_b: str
-    ) -> Tuple[bool, str]:
-        try:
-            from PIL import Image
-
-            model = self.client.GenerativeModel('gemini-1.5-flash')
-
-            img_a = Image.open(imagem_a)
-            img_b = Image.open(imagem_b)
-
-            # Prompt de análise visual
-            analise_prompt = f"""{prompt}
-
-TAREFA CRÍTICA - ANÁLISE VISUAL PARA FUSÃO:
-
-Analise as duas imagens e extraia:
-
-IMAGEM 1 (Referência Libras):
-- Configuração EXATA de cada dedo (quais estão estendidos, dobrados, formando qual letra)
-- Posição das mãos (altura em relação ao corpo, distância do rosto/peito)
-- Orientação da palma e dos dedos
-- Movimento indicado (setas, linhas de movimento)
-- Ponto de articulação (tocando onde? próximo a quê?)
-
-IMAGEM 2 (Personagem):
-- Estilo artístico EXATO: (traço grosso/fino, linha preta, colorido/P&B, sombreamento)
-- Proporções anatômicas (tamanho cabeça/corpo, braços)
-- Características faciais (formato olhos, nariz, boca, cabelo)
-- Paleta de cores (RGB principais, saturação)
-- Técnica: (vetorial, cartoon, flat, gradiente, textura)
-
-DESCRIÇÃO FINAL: Crie UM parágrafo ULTRA DETALHADO (500 palavras) descrevendo como desenhar o personagem da Imagem 2 executando EXATAMENTE o sinal da Imagem 1, mantendo 100% do estilo visual.
-
-Use linguagem específica para IA: "dedos indicador e médio totalmente estendidos formando V de 90 graus", "traço de contorno preto sólido 3px", "preenchimento chapado cor #FF5733", etc."""
-
-            log_provider_status(self.model_name, "ANALYZING", "Analisando imagens...")
-
-            response = model.generate_content([analise_prompt, img_a, img_b])
-            descricao = response.text
-
-            log_provider_status(self.model_name, "SUCCESS", "Análise completa")
-            return True, descricao
-
-        except Exception as e:
-            log_provider_status(self.model_name, "ERROR", str(e))
-            return False, f"Erro na análise Gemini: {str(e)}"
-
-    def gerar_imagem(
-        self,
-        prompt: str,
-        output_path: str,
-        imagem_init: Optional[str] = None
-    ) -> Tuple[bool, str, Optional[str]]:
-        # Gemini Imagen ainda em preview - não implementado
-        return False, "Gemini Imagen ainda não disponível publicamente", None
-
-
-# ==============================================================================
-# OPENAI - VISÃO + DALL-E 3
-# ==============================================================================
-
-class OpenAIProvider(BaseAIProvider):
-    """OpenAI GPT-4o Vision + DALL-E 3"""
-
-    def __init__(self, api_key: Optional[str] = None):
-        super().__init__(api_key)
-        self.model_name = "OpenAI GPT-4o + DALL-E 3"
-        self.requires_api_key = True
-        self.supports_vision = True
-        self.supports_generation = True
-
-        try:
-            from openai import OpenAI
-            self.client = OpenAI(api_key=self.api_key)
-        except ImportError:
-            raise ImportError("Instale: pip install openai")
-
-    def analisar_imagens(
-        self,
-        prompt: str,
-        imagem_a: str,
-        imagem_b: str
-    ) -> Tuple[bool, str]:
-        try:
-            img_a_b64 = self._carregar_imagem_base64(imagem_a)
-            img_b_b64 = self._carregar_imagem_base64(imagem_b)
-
-            log_provider_status(self.model_name, "ANALYZING", "GPT-4o analisando...")
-
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_a_b64}"}},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b_b64}"}}
-                    ]
-                }],
-                max_tokens=2000
-            )
-
-            descricao = response.choices[0].message.content
-            log_provider_status(self.model_name, "SUCCESS", "Análise GPT-4o completa")
-            return True, descricao
-
-        except Exception as e:
-            log_provider_status(self.model_name, "ERROR", str(e))
-            return False, f"Erro na análise OpenAI: {str(e)}"
-
-    def gerar_imagem(
-        self,
-        prompt: str,
-        output_path: str,
-        imagem_init: Optional[str] = None
-    ) -> Tuple[bool, str, Optional[str]]:
-        try:
-            log_provider_status(self.model_name, "GENERATING", "DALL-E 3 gerando...")
-
-            response = self.client.images.generate(
-                model="dall-e-3",
-                prompt=prompt[:4000],
-                size="1024x1024",
-                quality="standard",
-                n=1
-            )
-
-            img_url = response.data[0].url
-
-            if self._baixar_e_salvar_imagem(img_url, output_path):
-                log_provider_status(self.model_name, "SUCCESS", "DALL-E 3 gerado")
-                return True, f"Gerado com DALL-E 3", output_path
-            else:
-                return False, "Erro ao baixar DALL-E 3", None
-
-        except Exception as e:
-            log_provider_status(self.model_name, "ERROR", str(e))
-            return False, f"Erro no DALL-E 3: {str(e)}", None
-
-
-# ==============================================================================
-# REPLICATE - FLUX / SDXL
-# ==============================================================================
-
-class ReplicateProvider(BaseAIProvider):
-    """Replicate com Flux ou SDXL"""
-
-    def __init__(self, api_key: Optional[str] = None, model: str = "flux"):
-        super().__init__(api_key)
-        self.model_type = model
-        self.model_name = f"Replicate ({model.upper()})"
-        self.requires_api_key = True
-        self.supports_generation = True
-        self.supports_vision = False
-
-        self.models = {
-            "flux": "black-forest-labs/flux-schnell",
-            "sdxl": "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b"
-        }
-
-        try:
-            import replicate
-            self.client = replicate.Client(api_token=self.api_key)
-        except ImportError:
-            raise ImportError("Instale: pip install replicate")
-
-    def analisar_imagens(self, prompt: str, imagem_a: str, imagem_b: str) -> Tuple[bool, str]:
-        return False, "Replicate não suporta análise multimodal"
-
-    def gerar_imagem(
-        self,
-        prompt: str,
-        output_path: str,
-        imagem_init: Optional[str] = None
-    ) -> Tuple[bool, str, Optional[str]]:
-        try:
-            log_provider_status(self.model_name, "GENERATING", "Gerando...")
-
-            model_id = self.models[self.model_type]
-
-            input_params = {
-                "prompt": prompt,
-                "guidance_scale": 7.5,
-                "num_inference_steps": 4 if self.model_type == "flux" else 30
-            }
-
-            if imagem_init and os.path.exists(imagem_init):
-                with open(imagem_init, "rb") as f:
-                    input_params["image"] = f.read()
-                input_params["strength"] = 0.7
-
-            output = self.client.run(model_id, input=input_params)
-
-            if isinstance(output, list):
-                img_url = output[0]
-            else:
-                img_url = output
-
-            if self._baixar_e_salvar_imagem(img_url, output_path):
-                log_provider_status(self.model_name, "SUCCESS", "Imagem gerada")
-                return True, f"Gerado com {self.model_name}", output_path
-            else:
-                return False, "Erro ao baixar Replicate", None
-
-        except Exception as e:
-            log_provider_status(self.model_name, "ERROR", str(e))
-            return False, f"Erro no Replicate: {str(e)}", None
-
-
-# ==============================================================================
-# CUSTOM OPENAI-COMPATIBLE PROXY (9ROUTER / OPENROUTER)
-# ==============================================================================
-
-class CustomProxyProvider(BaseAIProvider):
-    """Provider customizado compatível com OpenAI (9Router, OpenRouter, etc)"""
-
-    def __init__(self, api_key: Optional[str] = None, base_url: str = "", model_name: str = ""):
-        super().__init__(api_key)
-        self.model_name = model_name or "Custom Proxy"
-        self.base_url = base_url
-        self.requires_api_key = True
-        self.supports_vision = True
-        self.supports_generation = True
-
-        try:
-            from openai import OpenAI
-            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-        except ImportError:
-            raise ImportError("Instale: pip install openai")
-
-    def analisar_imagens(
-        self,
-        prompt: str,
-        imagem_a: str,
-        imagem_b: str
-    ) -> Tuple[bool, str]:
-        try:
-            img_a_b64 = self._carregar_imagem_base64(imagem_a)
-            img_b_b64 = self._carregar_imagem_base64(imagem_b)
-
-            log_provider_status(self.model_name, "ANALYZING", "Analisando via proxy...")
-
-            response = self.client.chat.completions.create(
-                model="gpt-4-vision-preview",  # Modelo genérico
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_a_b64}"}},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b_b64}"}}
-                    ]
-                }],
-                max_tokens=2000
-            )
-
-            descricao = response.choices[0].message.content
-            log_provider_status(self.model_name, "SUCCESS", "Análise completa")
-            return True, descricao
-
-        except Exception as e:
-            log_provider_status(self.model_name, "ERROR", str(e))
-            return False, f"Erro no proxy: {str(e)}"
-
-    def gerar_imagem(
-        self,
-        prompt: str,
-        output_path: str,
-        imagem_init: Optional[str] = None
-    ) -> Tuple[bool, str, Optional[str]]:
-        try:
-            log_provider_status(self.model_name, "GENERATING", "Gerando via proxy...")
-
-            response = self.client.images.generate(
-                model="dall-e-3",
-                prompt=prompt[:4000],
-                size="1024x1024",
-                n=1
-            )
-
-            img_url = response.data[0].url
-
-            if self._baixar_e_salvar_imagem(img_url, output_path):
-                log_provider_status(self.model_name, "SUCCESS", "Imagem gerada")
-                return True, f"Gerado com {self.model_name}", output_path
-            else:
-                return False, "Erro ao baixar do proxy", None
-
-        except Exception as e:
-            log_provider_status(self.model_name, "ERROR", str(e))
-            return False, f"Erro no proxy: {str(e)}", None
-
-
-# ==============================================================================
-# SMART ROUTER - ROTEADOR INTELIGENTE COM AUTO-FALLBACK
-# ==============================================================================
 
 class SmartAIRouter:
-    """
-    Roteador Inteligente de IA com Auto-Fallback
-    Nunca para por falta de crédito!
-    """
-
-    def __init__(self, config: Dict[str, Any] = None):
-        """
-        Inicializa o router com configuração
-
-        config = {
-            "openai_key": "sk-...",
-            "gemini_key": "...",
-            "replicate_key": "r8_...",
-            "huggingface_key": "hf_...",
-            "custom_proxy_url": "https://...",
-            "custom_proxy_key": "...",
-            "priority_order": ["openai", "gemini", "replicate", "huggingface", "pollinations"]
-        }
-        """
+    """Gerencia o status e a prioridade dos provedores com Google Gemini em 1º lugar"""
+    def __init__(self, config: dict = None):
         self.config = config or {}
-        self.providers = {}
-        self.fallback_order = self.config.get("priority_order", [
-            "gemini",  # Gratuito para começar
-            "huggingface",  # Gratuito com token
-            "openai",  # Alta qualidade
-            "replicate",  # Custo-benefício
-            "pollinations"  # Fallback universal gratuito
-        ])
 
-        self._inicializar_providers()
+    def get_provider_status(self) -> dict:
+        gemini_key = self.config.get("gemini_key") or os.getenv("GEMINI_API_KEY")
+        hf_key = self.config.get("huggingface_key") or os.getenv("HUGGINGFACE_TOKEN")
+        openai_key = self.config.get("openai_key") or os.getenv("OPENAI_API_KEY")
+        replicate_key = self.config.get("replicate_key") or os.getenv("REPLICATE_API_TOKEN")
 
-    def _inicializar_providers(self):
-        """Inicializa todos os provedores disponíveis"""
-        # Google Gemini
-        if self.config.get("gemini_key"):
-            try:
-                self.providers["gemini"] = GoogleGeminiProvider(self.config["gemini_key"])
-            except Exception as e:
-                log_provider_status("Gemini", "INIT_ERROR", str(e))
-
-        # OpenAI
-        if self.config.get("openai_key"):
-            try:
-                self.providers["openai"] = OpenAIProvider(self.config["openai_key"])
-            except Exception as e:
-                log_provider_status("OpenAI", "INIT_ERROR", str(e))
-
-        # Replicate
-        if self.config.get("replicate_key"):
-            try:
-                self.providers["replicate"] = ReplicateProvider(
-                    self.config["replicate_key"],
-                    self.config.get("replicate_model", "flux")
-                )
-            except Exception as e:
-                log_provider_status("Replicate", "INIT_ERROR", str(e))
-
-        # HuggingFace
-        if self.config.get("huggingface_key"):
-            try:
-                self.providers["huggingface"] = HuggingFaceProvider(self.config["huggingface_key"])
-            except Exception as e:
-                log_provider_status("HuggingFace", "INIT_ERROR", str(e))
-
-        # Custom Proxy
-        if self.config.get("custom_proxy_url") and self.config.get("custom_proxy_key"):
-            try:
-                self.providers["custom"] = CustomProxyProvider(
-                    self.config["custom_proxy_key"],
-                    self.config["custom_proxy_url"],
-                    self.config.get("custom_proxy_model", "9Router")
-                )
-            except Exception as e:
-                log_provider_status("CustomProxy", "INIT_ERROR", str(e))
-
-        # Pollinations (sempre disponível - sem API key)
-        try:
-            self.providers["pollinations"] = PollinationsAIProvider()
-        except Exception as e:
-            log_provider_status("Pollinations", "INIT_ERROR", str(e))
-
-    def fusion_generate(
-        self,
-        prompt: str,
-        imagem_referencia_a: str,
-        imagem_personagem_b: str,
-        output_path: str
-    ) -> Tuple[bool, str, Optional[str], str]:
-        """
-        Estratégia Fusion: Análise multimodal + Geração com auto-fallback
-
-        Returns:
-            (sucesso, mensagem, caminho_arquivo, provider_usado)
-        """
-        log_provider_status("SmartRouter", "START", "Iniciando Fusion Generate")
-
-        # ETAPA 1: ANÁLISE MULTIMODAL (Visão)
-        descricao_fusao = None
-        vision_provider = None
-
-        # Tentar análise com providers que suportam visão
-        for provider_name in self.fallback_order:
-            if provider_name not in self.providers:
-                continue
-
-            provider = self.providers[provider_name]
-
-            if provider.supports_vision:
-                log_provider_status("SmartRouter", "VISION_TRY", f"Tentando análise com {provider.model_name}")
-                sucesso, resultado = provider.analisar_imagens(prompt, imagem_referencia_a, imagem_personagem_b)
-
-                if sucesso:
-                    descricao_fusao = resultado
-                    vision_provider = provider.model_name
-                    log_provider_status("SmartRouter", "VISION_SUCCESS", f"Análise completa com {vision_provider}")
-                    break
-
-        # Se não conseguiu análise, usar prompt original
-        if not descricao_fusao:
-            log_provider_status("SmartRouter", "VISION_FALLBACK", "Usando prompt original sem análise")
-            descricao_fusao = prompt
-
-        # ETAPA 2: GERAÇÃO DE IMAGEM COM AUTO-FALLBACK
-        for provider_name in self.fallback_order:
-            if provider_name not in self.providers:
-                continue
-
-            provider = self.providers[provider_name]
-
-            if not provider.supports_generation:
-                continue
-
-            log_provider_status("SmartRouter", "GEN_TRY", f"Tentando geração com {provider.model_name}")
-
-            try:
-                sucesso, mensagem, caminho = provider.gerar_imagem(
-                    descricao_fusao,
-                    output_path,
-                    imagem_personagem_b
-                )
-
-                if sucesso:
-                    provider_info = f"Visão: {vision_provider or 'N/A'} | Geração: {provider.model_name}"
-                    log_provider_status("SmartRouter", "SUCCESS", provider_info)
-                    return True, mensagem, caminho, provider_info
-                else:
-                    log_provider_status("SmartRouter", "GEN_FAIL", f"{provider.model_name}: {mensagem}")
-                    # Continuar para próximo provider
-                    continue
-
-            except Exception as e:
-                log_provider_status("SmartRouter", "GEN_ERROR", f"{provider.model_name}: {str(e)}")
-                # Continuar para próximo provider
-                continue
-
-        # Se chegou aqui, todos falharam
-        return False, "Todos os provedores falharam (incluindo Pollinations)", None, "Nenhum"
-
-    def get_available_providers(self) -> List[str]:
-        """Retorna lista de providers disponíveis"""
-        return list(self.providers.keys())
-
-    def get_provider_status(self) -> Dict[str, Dict]:
-        """Retorna status de cada provider"""
-        status = {}
-        for name, provider in self.providers.items():
-            status[name] = {
-                "name": provider.model_name,
-                "vision": provider.supports_vision,
-                "generation": provider.supports_generation,
-                "requires_key": provider.requires_api_key,
-                "ready": True
+        return {
+            "gemini": {
+                "name": "1️⃣ Google Gemini API (Nano Banana 2 / AI Studio)",
+                "ready": bool(gemini_key),
+                "requires_key": True
+            },
+            "pollinations": {
+                "name": "2️⃣ Pollinations.ai (Flux - Free)",
+                "ready": True,
+                "requires_key": False
+            },
+            "huggingface": {
+                "name": "3️⃣ HuggingFace (FLUX.1-schnell)",
+                "ready": bool(hf_key),
+                "requires_key": True
+            },
+            "openai": {
+                "name": "4️⃣ OpenAI (DALL-E 3)",
+                "ready": bool(openai_key),
+                "requires_key": True
+            },
+            "replicate": {
+                "name": "5️⃣ Replicate (Flux)",
+                "ready": bool(replicate_key),
+                "requires_key": True
             }
-        return status
+        }
 
-
-# ==============================================================================
-# CLASSE LEGACY (Compatibilidade com código antigo)
-# ==============================================================================
 
 class AIGenerator:
-    """Wrapper para manter compatibilidade com código antigo"""
+    def __init__(self, provider: str = "smart-router", config: dict = None):
+        self.provider = provider
+        self.config = config or {}
 
-    def __init__(self, provider: str = "smart-router", api_key: Optional[str] = None, config: Dict = None):
-        if provider == "smart-router":
-            self.router = SmartAIRouter(config or {})
-            self.provider_name = "Smart Router"
-        else:
-            # Modo single-provider (legado)
-            self.router = None
-            self.provider_name = provider
+    def _encode_image_b64(self, image_path: str) -> tuple:
+        """Converte imagem local para Base64 redimensionada para envio rápido à API do Gemini"""
+        with Image.open(image_path) as img:
+            img = img.convert("RGB")
+            img.thumbnail((1024, 1024))
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=85)
+            b64_data = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            return b64_data, "image/jpeg"
 
     def gerar_imagem(
         self,
         prompt: str,
-        imagem_referencia_a: str,
-        imagem_personagem_b: str,
+        imagem_referencia_a: str = None,
+        imagem_personagem_b: str = None,
         output_dir: str = "output",
-        nome_arquivo: Optional[str] = None
-    ) -> Tuple[bool, str, Optional[str]]:
-        """Interface compatível com código legado"""
+        nome_arquivo: str = "sinal_gerado.png"
+    ) -> tuple:
+        """
+        Retorna (sucesso: bool, mensagem: str, caminho_saida: str)
+        """
         Path(output_dir).mkdir(parents=True, exist_ok=True)
+        caminho_saida = str(Path(output_dir) / nome_arquivo)
 
-        if not nome_arquivo:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            nome_arquivo = f"sinal_{timestamp}.png"
+        # Ordem de prioridade padrão: Google Gemini em 1º lugar!
+        ordem = self.config.get(
+            "priority_order",
+            ["gemini", "huggingface", "openai", "replicate", "pollinations"]
+        )
 
-        output_path = os.path.join(output_dir, nome_arquivo)
+        erros_acumulados = []
 
-        if self.router:
-            sucesso, msg, caminho, provider_usado = self.router.fusion_generate(
-                prompt,
-                imagem_referencia_a,
-                imagem_personagem_b,
-                output_path
+        for prov in ordem:
+            if prov == "gemini":
+                key = self.config.get("gemini_key") or os.getenv("GEMINI_API_KEY")
+                if not key:
+                    continue
+                ok, msg = self._gerar_com_gemini(
+                    key, prompt, imagem_referencia_a, imagem_personagem_b, caminho_saida
+                )
+                if ok:
+                    return True, msg, caminho_saida
+                erros_acumulados.append(f"Gemini: {msg}")
+
+            elif prov == "pollinations":
+                ok, msg = self._gerar_com_pollinations(prompt, caminho_saida)
+                if ok:
+                    return True, msg, caminho_saida
+                erros_acumulados.append(f"Pollinations: {msg}")
+
+            elif prov == "huggingface":
+                key = self.config.get("huggingface_key") or os.getenv("HUGGINGFACE_TOKEN")
+                if not key:
+                    continue
+                ok, msg = self._gerar_com_huggingface(key, prompt, caminho_saida)
+                if ok:
+                    return True, msg, caminho_saida
+                erros_acumulados.append(f"HuggingFace: {msg}")
+
+            elif prov == "openai":
+                key = self.config.get("openai_key") or os.getenv("OPENAI_API_KEY")
+                if not key:
+                    continue
+                ok, msg = self._gerar_com_openai(key, prompt, caminho_saida)
+                if ok:
+                    return True, msg, caminho_saida
+                erros_acumulados.append(f"OpenAI: {msg}")
+
+        resumo_erros = " | ".join(erros_acumulados) if erros_acumulados else "Nenhum provedor configurado respondeu."
+        return False, resumo_erros, None
+
+    def _gerar_com_gemini(self, api_key: str, prompt: str, img_ref: str, img_char: str, caminho_saida: str) -> tuple:
+        """
+        Usa a API do Google AI Studio tentando os modelos de geração nativa de imagens do Gemini
+        (Nano Banana 2 / gemini-2.5-flash-image-preview / gemini-2.0-flash-exp-image-generation / Imagen 3).
+        """
+        partes = []
+
+        # Anexar Imagem A (Referência do Capovilla) e Imagem B (Personagem)
+        if img_ref and os.path.exists(img_ref):
+            b64_ref, mime_ref = self._encode_image_b64(img_ref)
+            partes.append({"inlineData": {"mimeType": mime_ref, "data": b64_ref}})
+
+        if img_char and os.path.exists(img_char):
+            b64_char, mime_char = self._encode_image_b64(img_char)
+            partes.append({"inlineData": {"mimeType": mime_char, "data": b64_char}})
+
+        instrucao_multimodal = (
+            "Generate a high-quality 2D pedagogical illustration for Brazilian Sign Language (Libras). "
+            "Use the SECOND attached image as the exact character model (keep the same face, hair, clothes, and 2D vector style). "
+            "Use the FIRST attached image (dictionary technical drawing) and the following description to position the character's hands, "
+            "fingers, and facial expression accurately executing the sign. Clean white background, didactic flashcards style.\n\n"
+            f"Sign Details:\n{prompt}"
+        )
+        partes.append({"text": instrucao_multimodal})
+
+        # Lista de modelos de imagem do Google AI Studio (do mais novo Nano Banana 2 aos fallbacks oficiais)
+        modelos_gemini_img = [
+            "gemini-2.5-flash-image-preview",
+            "gemini-2.0-flash-preview-image-generation",
+            "gemini-2.0-flash-exp-image-generation",
+            "gemini-2.0-flash-exp"
+        ]
+
+        ultimo_erro = ""
+
+        for modelo in modelos_gemini_img:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={api_key}"
+            payload = {
+                "contents": [{"parts": partes}],
+                "generationConfig": {
+                    "responseModalities": ["TEXT", "IMAGE"]
+                }
+            }
+            try:
+                resp = requests.post(url, json=payload, timeout=60)
+                if resp.status_code == 200:
+                    dados = resp.json()
+                    candidatos = dados.get("candidates", [])
+                    for cand in candidatos:
+                        for part in cand.get("content", {}).get("parts", []):
+                            if "inlineData" in part and "data" in part["inlineData"]:
+                                img_bytes = base64.b64decode(part["inlineData"]["data"])
+                                with open(caminho_saida, "wb") as f:
+                                    f.write(img_bytes)
+                                return True, f"Gerado via Google Gemini ({modelo})"
+                else:
+                    msg_api = resp.json().get("error", {}).get("message", f"HTTP {resp.status_code}")
+                    ultimo_erro = f"{modelo}: {msg_api}"
+            except Exception as e:
+                ultimo_erro = str(e)
+
+        # Fallback para Imagen 3 na mesma chave do Google AI Studio caso os modelos Flash Image estejam indisponíveis na região
+        url_imagen = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key={api_key}"
+        try:
+            resp_img = requests.post(
+                url_imagen,
+                json={
+                    "instances": [{"prompt": instrucao_multimodal[:900]}],
+                    "parameters": {"sampleCount": 1}
+                },
+                timeout=60
             )
-            return sucesso, f"{msg} [{provider_usado}]", caminho
-        else:
-            return False, "Modo single-provider não implementado nesta versão", None
+            if resp_img.status_code == 200:
+                preds = resp_img.json().get("predictions", [])
+                if preds and "bytesBase64Encoded" in preds[0]:
+                    img_bytes = base64.b64decode(preds[0]["bytesBase64Encoded"])
+                    with open(caminho_saida, "wb") as f:
+                        f.write(img_bytes)
+                    return True, "Gerado via Google Gemini (Imagen 3)"
+        except Exception:
+            pass
+
+        return False, ultimo_erro or "A chave Gemini informada não retornou imagem."
+
+ def _gerar_com_pollinations(self, prompt: str, caminho_saida: str) -> tuple:
+        """
+        Geração via Pollinations.ai com limpeza de caracteres e fallback robusto
+        """
+        import re
+        import urllib.parse
+        
+        # Limpar quebras de linha e caracteres complexos para evitar erro 400/414
+        prompt_sanitizado = re.sub(r'[^a-zA-Z0-9\s,.-]', '', prompt)
+        resumo = " ".join(prompt_sanitizado.split())[:300]
+        
+        texto_final = f"2D vector flat illustration Brazilian sign language Libras character: {resumo}"
+        prompt_encoded = urllib.parse.quote(texto_final)
+
+        # Chave configurada
+        pollinations_key = self.config.get("pollinations_key") or os.getenv("POLLINATIONS_API_KEY")
+        if not pollinations_key:
+            try:
+                import streamlit as st
+                if hasattr(st, "secrets") and "POLLINATIONS_API_KEY" in st.secrets:
+                    pollinations_key = st.secrets["POLLINATIONS_API_KEY"]
+            except Exception:
+                pass
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
+        if pollinations_key:
+            headers["Authorization"] = f"Bearer {pollinations_key}"
+
+        urls = [
+            f"https://image.pollinations.ai/prompt/{prompt_encoded}?width=768&height=768&model=flux&nologo=true&seed=42",
+            f"https://image.pollinations.ai/prompt/{prompt_encoded}?model=turbo&nologo=true"
+        ]
+
+        for url in urls:
+            try:
+                r = requests.get(url, headers=headers, timeout=50)
+                if r.status_code == 200 and len(r.content) > 2000:
+                    with open(caminho_saida, "wb") as f:
+                        f.write(r.content)
+                    return True, "Gerado com sucesso via Pollinations.ai"
+            except Exception:
+                continue
+
+        return False, "Pollinations indisponível de momento."
+
+    def _gerar_com_openai(self, api_key: str, prompt: str, caminho_saida: str) -> tuple:
+        url = "https://api.openai.com/v1/images/generations"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {"model": "dall-e-3", "prompt": prompt[:3500], "n": 1, "size": "1024x1024"}
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=60)
+            if resp.status_code == 200:
+                img_url = resp.json()["data"][0]["url"]
+                img_data = requests.get(img_url, timeout=30).content
+                with open(caminho_saida, "wb") as f:
+                    f.write(img_data)
+                return True, "Gerado via OpenAI (DALL-E 3)"
+            return False, resp.json().get("error", {}).get("message", f"HTTP {resp.status_code}")
+        except Exception as e:
+            return False, str(e)
