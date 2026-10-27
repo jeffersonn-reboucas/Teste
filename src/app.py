@@ -82,6 +82,11 @@ def inicializar_diretorios():
 
 def inicializar_pdfs():
     """Inicializa e baixa PDFs do Google Drive se necessário"""
+    import streamlit as st
+    
+    if 'pdfs_inicializados' not in st.session_state:
+        st.session_state.pdfs_inicializados = False
+
     if st.session_state.pdfs_inicializados:
         return
 
@@ -92,9 +97,7 @@ def inicializar_pdfs():
         st.warning("⚠️ PDFs não encontrados localmente")
         st.info("🌐 Tentando baixar do Google Drive...")
 
-        # Verificar se há file_ids configurados (via secrets ou código)
         try:
-            import streamlit as st
             file_ids = {}
 
             # Tentar ler dos secrets do Streamlit Cloud
@@ -129,7 +132,6 @@ def inicializar_pdfs():
         st.sidebar.success(f"✅ {len(pdfs_disponiveis)} PDF(s) disponível(is)")
 
     st.session_state.pdfs_inicializados = True
-
 
 def listar_personagens_disponiveis():
     """Lista personagens salvos na pasta assets/personagens"""
