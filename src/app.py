@@ -4,6 +4,7 @@ Fluxo: Item A (Referência) + Item B (Personagem) → Item C (Resultado)
 """
 import streamlit as st
 import os
+import re
 from pathlib import Path
 from datetime import datetime
 from PIL import Image
@@ -29,7 +30,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Inicializar session state
+# ============================================================================
+# INICIALIZAÇÃO DO SESSION STATE (PERSISTÊNCIA ENTRE RERUNS)
+# ============================================================================
 if 'catalogo' not in st.session_state:
     st.session_state.catalogo = CatalogoSinais()
 
@@ -44,6 +47,9 @@ if 'ultimo_prompt' not in st.session_state:
 
 if 'pdf_manager' not in st.session_state:
     st.session_state.pdf_manager = PDFManager()
+
+if 'pdfs_inicializados' not in st.session_state:
+    st.session_state.pdfs_inicializados = False
 
 if 'pdf_capovilla' not in st.session_state:
     try:
@@ -65,12 +71,32 @@ if 'pdf_config_mao' not in st.session_state:
     except FileNotFoundError:
         st.session_state.pdf_config_mao = None
 
+# Estados persistentes para Referência (Item A), Busca e Fallback
 if 'parametros_extraidos' not in st.session_state:
     st.session_state.parametros_extraidos = None
 
-if 'pdfs_inicializados' not in st.session_state:
-    st.session_state.pdfs_inicializados = False
+if 'imagem_ref_path' not in st.session_state:
+    st.session_state.imagem_ref_path = None
 
+if 'termo_atual' not in st.session_state:
+    st.session_state.termo_atual = ""
+
+if 'resultados_busca_pdf' not in st.session_state:
+    st.session_state.resultados_busca_pdf = []
+
+if 'ultimo_upload_nome' not in st.session_state:
+    st.session_state.ultimo_upload_nome = None
+
+if 'mostrar_fallback_free' not in st.session_state:
+    st.session_state.mostrar_fallback_free = False
+
+if 'erro_geracao_msg' not in st.session_state:
+    st.session_state.erro_geracao_msg = ""
+
+
+# ============================================================================
+# FUNÇÕES AUXILIARES
+# ============================================================================
 
 def inicializar_diretorios():
     """Cria os diretórios necessários"""
@@ -82,15 +108,12 @@ def inicializar_diretorios():
 
 def inicializar_pdfs():
     """Inicializa e baixa PDFs do Google Drive se necessário"""
-    import streamlit as st
-    
     if 'pdfs_inicializados' not in st.session_state:
         st.session_state.pdfs_inicializados = False
 
     if st.session_state.pdfs_inicializados:
         return
 
-    # Verificar se os PDFs existem
     pdfs_disponiveis = st.session_state.pdf_manager.listar_pdfs_disponiveis()
 
     if len(pdfs_disponiveis) == 0:
@@ -99,19 +122,15 @@ def inicializar_pdfs():
 
         try:
             file_ids = {}
-
-            # Tentar ler dos secrets do Streamlit Cloud
             if hasattr(st, 'secrets') and 'gdrive' in st.secrets:
                 file_ids = {
                     "Dicionario capovilla completo.pdf": st.secrets['gdrive'].get('capovilla_file_id'),
                     "configuraçao de mao.pdf": st.secrets['gdrive'].get('config_mao_file_id')
                 }
 
-            # Tentar baixar
             if file_ids and all(file_ids.values()):
                 if st.session_state.pdf_manager.baixar_todos_pdfs(file_ids):
                     st.success("✅ PDFs baixados com sucesso!")
-                    # Reinicializar extractors
                     st.session_state.pdf_capovilla = PDFCapovillaExtractor(
                         st.session_state.pdf_manager.get_pdf_path("Dicionario capovilla completo.pdf")
                     )
@@ -133,6 +152,7 @@ def inicializar_pdfs():
 
     st.session_state.pdfs_inicializados = True
 
+
 def listar_personagens_disponiveis():
     """Lista personagens salvos na pasta assets/personagens"""
     personagens_dir = Path("assets/personagens")
@@ -141,14 +161,56 @@ def listar_personagens_disponiveis():
     return []
 
 
+def analisar_imagem_upload(caminho_imagem: str, nome_arquivo: str):
+    """
+    Tenta extrair texto/parâmetros da imagem enviada manualmente (via OCR/PyMuPDF ou busca inteligente no PDF pelo nome).
+    """
+    texto_extraido = ""
+
+    # 1. Tentar OCR via PyMuPDF ou pytesseract se disponível no ambiente
+    try:
+        import pytesseract
+        img = Image.open(caminho_imagem)
+        texto_extraido = pytesseract.image_to_string(img, lang="por")
+    except Exception:
+        pass
+
+    # 2. Se não houver OCR de sistema instalado, tenta cruzar o nome do arquivo com o dicionário PDF carregado
+    termo_inferido = Path(nome_arquivo).stem.replace("_", " ").replace("-", " ").strip()
+    if termo_inferido.lower() == "atoa":
+        termo_inferido = "à toa"
+
+    if not texto_extraido.strip() and st.session_state.pdf_capovilla is not None and len(termo_inferido) >= 2:
+        try:
+            resultados = st.session_state.pdf_capovilla.buscar_termo(termo_inferido, max_resultados=3)
+            if resultados:
+                texto_extraido = resultados[0].get('texto_completo', '')
+        except Exception:
+            pass
+
+    # 3. Extrair parâmetros se encontrou texto
+    if texto_extraido and len(texto_extraido.strip()) > 10:
+        if st.session_state.pdf_capovilla is not None:
+            parametros = st.session_state.pdf_capovilla.extrair_parametros_sinal(texto_extraido)
+            if parametros:
+                return parametros, termo_inferido.upper()
+        return {
+            'configuracao_mao': [],
+            'orientacao': 'Palma para cima',
+            'ponto_articulacao': 'Espaço neutro',
+            'movimento': [],
+            'descricao_completa': texto_extraido.strip()
+        }, termo_inferido.upper()
+
+    return None, termo_inferido.upper()
+
+
 # ============================================================================
 # INTERFACE PRINCIPAL
 # ============================================================================
 
 def main():
     inicializar_diretorios()
-
-    # Inicializar PDFs (baixar do Google Drive se necessário)
     inicializar_pdfs()
 
     # Cabeçalho
@@ -160,7 +222,6 @@ def main():
     with st.sidebar:
         st.header("⚙️ Configurações de IA")
 
-        # Modo de operação
         modo_operacao = st.radio(
             "Modo de Geração",
             ["🔄 Smart Router (Auto-Fallback)", "🎯 Provider Específico"],
@@ -170,9 +231,8 @@ def main():
         if modo_operacao == "🔄 Smart Router (Auto-Fallback)":
             st.success("✨ Modo inteligente ativado: nunca para por falta de crédito!")
 
-            # Configuração de múltiplas API keys
             with st.expander("🔑 Configurar API Keys (Opcional)"):
-                st.info("Configure quantas quiser. O sistema usará as disponíveis e fará fallback para opções gratuitas.")
+                st.info("Configure quantas quiser. Se nenhuma for configurada, você poderá usar o Pollinations.ai gratuitamente.")
 
                 openai_key = st.text_input("OpenAI API Key", type="password", key="openai_key")
                 gemini_key = st.text_input("Google Gemini API Key", type="password", key="gemini_key")
@@ -191,7 +251,6 @@ def main():
                     custom_proxy_key = None
                     custom_proxy_model = None
 
-            # Ordem de prioridade
             with st.expander("⚙️ Ordem de Fallback"):
                 st.markdown("**Ordem atual:**")
                 fallback_order = [
@@ -204,9 +263,6 @@ def main():
                 for item in fallback_order:
                     st.text(item)
 
-                st.info("💡 O sistema tenta na ordem acima até conseguir gerar a imagem")
-
-            # Configurar router
             router_config = {
                 "openai_key": openai_key or os.getenv("OPENAI_API_KEY"),
                 "gemini_key": gemini_key or os.getenv("GEMINI_API_KEY"),
@@ -221,9 +277,8 @@ def main():
                 router_config["custom_proxy_model"] = custom_proxy_model
 
             provider = "smart-router"
-            api_key = None  # Não usado no modo router
+            api_key = None
 
-            # Mostrar status dos providers
             from ai_generator import SmartAIRouter
             try:
                 temp_router = SmartAIRouter(router_config)
@@ -234,10 +289,10 @@ def main():
 
                 for name, status in provider_status.items():
                     icon = "✅" if status['ready'] else "❌"
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
+                    col_s1, col_s2 = st.columns([3, 1])
+                    with col_s1:
                         st.text(f"{icon} {status['name']}")
-                    with col2:
+                    with col_s2:
                         if not status['requires_key']:
                             st.caption("FREE")
                         elif status['ready']:
@@ -251,17 +306,16 @@ def main():
             st.info("Modo direto: usa apenas o provider selecionado")
 
             provider_options = {
+                "🌸 Pollinations.ai (Flux - 100% Gratuito)": "pollinations",
                 "🔵 Google Gemini (Gratuito - Análise)": "gemini",
                 "🟢 OpenAI DALL-E 3": "openai",
                 "🟣 Replicate Flux": "replicate-flux",
-                "🟠 HuggingFace FLUX.1": "huggingface",
-                "🌸 Pollinations.ai (Gratuito)": "pollinations"
+                "🟠 HuggingFace FLUX.1": "huggingface"
             }
 
             selected = st.selectbox("Provider", list(provider_options.keys()))
             provider = provider_options[selected]
 
-            # API Key específica
             if provider == "openai":
                 api_key = st.text_input("OpenAI API Key", type="password")
             elif provider == "gemini":
@@ -271,7 +325,7 @@ def main():
             elif provider == "huggingface":
                 api_key = st.text_input("HuggingFace Token", type="password")
             elif provider == "pollinations":
-                api_key = None
+                api_key = "FREE_MODE"
                 st.success("✅ Sem necessidade de API key!")
             else:
                 api_key = None
@@ -279,8 +333,6 @@ def main():
             router_config = None
 
         st.divider()
-
-        # Otimização de tokens
         st.subheader("🚀 Otimizações")
 
         modo_otimizado = st.checkbox(
@@ -293,8 +345,6 @@ def main():
             st.caption("✅ Prompt será otimizado para economizar tokens")
 
         st.divider()
-
-        # Estatísticas do catálogo
         st.subheader("📊 Catálogo")
         stats = st.session_state.catalogo.estatisticas()
         st.metric("Total de Sinais", stats['total_sinais'])
@@ -318,19 +368,9 @@ def main():
         st.header("📖 Item A: Referência do Sinal")
         st.markdown("*Imagem do dicionário (Capovilla) com o desenho técnico*")
 
-        # Abas: Upload manual ou Buscar no PDF
         tab_upload, tab_busca_pdf = st.tabs(["📤 Upload Manual", "🔍 Buscar no Dicionário (PDF)"])
 
-        imagem_ref_path = None
-        termo = ""
-        configuracoes = []
-        ponto_articulacao = "Espaço neutro"
-        movimentos = []
-        orientacao = "Palma para cima"
-        expressoes = ["Neutra"]
-        observacoes = ""
-
-        # Tab 1: Upload Manual
+        # Tab 1: Upload Manual com Análise Automática
         with tab_upload:
             uploaded_ref = st.file_uploader(
                 "Upload da imagem de referência",
@@ -338,24 +378,37 @@ def main():
                 key="upload_ref"
             )
 
-            if uploaded_ref:
-                # Salvar temporariamente
-                imagem_ref_path = f"assets/referencias/temp_ref_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                with open(imagem_ref_path, "wb") as f:
-                    f.write(uploaded_ref.getbuffer())
+            if uploaded_ref is not None:
+                # Se é um novo arquivo enviado, salva e analisa automaticamente
+                if st.session_state.ultimo_upload_nome != uploaded_ref.name:
+                    caminho_salvo = f"assets/referencias/temp_ref_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    with open(caminho_salvo, "wb") as f:
+                        f.write(uploaded_ref.getbuffer())
 
-                # Exibir preview
-                st.image(imagem_ref_path, caption="Referência do Sinal", use_container_width=True)
+                    st.session_state.imagem_ref_path = caminho_salvo
+                    st.session_state.ultimo_upload_nome = uploaded_ref.name
 
-        # Tab 2: Busca no PDF do Capovilla
+                    with st.spinner("🔎 Analisando imagem para extrair parâmetros do sinal..."):
+                        params_detectados, termo_sugerido = analisar_imagem_upload(caminho_salvo, uploaded_ref.name)
+                        if termo_sugerido and not st.session_state.termo_atual:
+                            st.session_state.termo_atual = termo_sugerido
+
+                        if params_detectados:
+                            st.session_state.parametros_extraidos = params_detectados
+                            st.success("✅ Descrição e parâmetros extraídos automaticamente da imagem!")
+                        else:
+                            st.info("ℹ️ Nenhuma descrição textual detectada na imagem. Por favor, preencha o Nome do Sinal (e observações se desejar) abaixo.")
+
+                if st.session_state.imagem_ref_path and os.path.exists(st.session_state.imagem_ref_path):
+                    st.image(st.session_state.imagem_ref_path, caption="Referência do Sinal", use_container_width=True)
+
+        # Tab 2: Busca no PDF do Capovilla com Persistência
         with tab_busca_pdf:
             if st.session_state.pdf_capovilla is None:
                 st.error("❌ PDF do Capovilla não encontrado!")
-                st.info(f"📁 Esperado em: `C:\\Users\\Jeffe\\Downloads\\Dicionario capovilla completo.pdf`")
             else:
                 st.success(f"✅ PDF carregado ({st.session_state.pdf_capovilla.get_total_paginas()} páginas)")
 
-                # Opções de busca
                 tipo_busca = st.radio(
                     "Tipo de busca",
                     ["🔤 Buscar por Termo", "📄 Ir para Página"],
@@ -366,7 +419,7 @@ def main():
                 if tipo_busca == "🔤 Buscar por Termo":
                     termo_busca = st.text_input(
                         "Digite o termo a buscar",
-                        placeholder="Ex: CASA, OBRIGADO, ESCOLA",
+                        placeholder="Ex: CASA, À TOA, ESCOLA",
                         key="termo_busca_pdf"
                     )
 
@@ -374,90 +427,105 @@ def main():
                         if termo_busca:
                             with st.spinner("Buscando no dicionário..."):
                                 resultados = st.session_state.pdf_capovilla.buscar_termo(termo_busca, max_resultados=10)
+                                st.session_state.resultados_busca_pdf = resultados
+                                st.session_state.termo_atual = termo_busca.upper()
+                                if not resultados:
+                                    st.warning("⚠️ Nenhum resultado encontrado para este termo.")
 
-                                if resultados:
-                                    st.success(f"✅ Encontrados {len(resultados)} resultado(s)")
+                    # Exibir resultados persistidos no session_state
+                    if st.session_state.resultados_busca_pdf:
+                        resultados = st.session_state.resultados_busca_pdf
+                        st.success(f"✅ Encontrados {len(resultados)} resultado(s)")
 
-                                    # Selecionar resultado
-                                    opcoes_resultados = [f"Página {r['pagina']}" for r in resultados]
-                                    resultado_selecionado = st.selectbox(
-                                        "Selecione o resultado",
-                                        range(len(opcoes_resultados)),
-                                        format_func=lambda i: opcoes_resultados[i],
-                                        key="resultado_sel"
-                                    )
+                        opcoes_resultados = [f"Página {r['pagina']}" for r in resultados]
+                        resultado_selecionado = st.selectbox(
+                            "Selecione o resultado",
+                            range(len(opcoes_resultados)),
+                            format_func=lambda i: opcoes_resultados[i],
+                            key="resultado_sel"
+                        )
 
-                                    pagina_selecionada = resultados[resultado_selecionado]['pagina']
+                        pagina_selecionada = resultados[resultado_selecionado]['pagina']
 
-                                    # Renderizar página
-                                    with st.spinner("Renderizando página..."):
-                                        img_pagina = st.session_state.pdf_capovilla.renderizar_pagina(pagina_selecionada)
+                        # Renderizar e persistir página selecionada
+                        caminho_pag = f"assets/referencias/capovilla_p{pagina_selecionada}.png"
+                        if not os.path.exists(caminho_pag):
+                            with st.spinner("Renderizando página..."):
+                                img_pagina = st.session_state.pdf_capovilla.renderizar_pagina(pagina_selecionada)
+                                img_pagina.save(caminho_pag)
 
-                                        # Salvar como referência
-                                        imagem_ref_path = f"assets/referencias/capovilla_p{pagina_selecionada}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                                        img_pagina.save(imagem_ref_path)
+                        st.session_state.imagem_ref_path = caminho_pag
+                        st.image(caminho_pag, caption=f"Página {pagina_selecionada}", use_container_width=True)
 
-                                        st.image(img_pagina, caption=f"Página {pagina_selecionada}", use_container_width=True)
-                                        st.info("💡 Você pode recortar apenas a ilustração do sinal usando um editor de imagem externo")
-
-                                    # Extrair parâmetros automaticamente
-                                    texto_pagina = resultados[resultado_selecionado]['texto_completo']
-                                    parametros = st.session_state.pdf_capovilla.extrair_parametros_sinal(texto_pagina)
-
-                                    if parametros:
-                                        st.success("✅ Parâmetros extraídos automaticamente!")
-                                        with st.expander("📋 Ver Descrição Extraída"):
-                                            st.text(parametros['descricao_completa'])
-
-                                        st.session_state.parametros_extraidos = parametros
-                                else:
-                                    st.warning("⚠️ Nenhum resultado encontrado")
+                        # Extrair parâmetros automaticamente da página selecionada
+                        texto_pagina = resultados[resultado_selecionado]['texto_completo']
+                        parametros = st.session_state.pdf_capovilla.extrair_parametros_sinal(texto_pagina)
+                        if parametros:
+                            st.session_state.parametros_extraidos = parametros
+                        else:
+                            st.session_state.parametros_extraidos = {
+                                'configuracao_mao': [],
+                                'orientacao': 'Palma para cima',
+                                'ponto_articulacao': 'Espaço neutro',
+                                'movimento': [],
+                                'descricao_completa': texto_pagina[:800] if texto_pagina else ""
+                            }
 
                 else:  # Ir para página
                     num_pagina = st.number_input(
                         "Número da página",
                         min_value=1,
                         max_value=st.session_state.pdf_capovilla.get_total_paginas(),
-                        value=1,
+                        value=127,
                         key="num_pagina_pdf"
                     )
 
                     if st.button("📄 Carregar Página", key="btn_carregar_pagina"):
                         with st.spinner("Renderizando página..."):
                             img_pagina = st.session_state.pdf_capovilla.renderizar_pagina(num_pagina)
+                            caminho_pag = f"assets/referencias/capovilla_p{num_pagina}.png"
+                            img_pagina.save(caminho_pag)
+                            st.session_state.imagem_ref_path = caminho_pag
 
-                            # Salvar como referência
-                            imagem_ref_path = f"assets/referencias/capovilla_p{num_pagina}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                            img_pagina.save(imagem_ref_path)
-
-                            st.image(img_pagina, caption=f"Página {num_pagina}", use_container_width=True)
-
-                            # Extrair texto e tentar extrair parâmetros
                             texto_pagina = st.session_state.pdf_capovilla.extrair_texto_pagina(num_pagina)
                             parametros = st.session_state.pdf_capovilla.extrair_parametros_sinal(texto_pagina)
-
                             if parametros:
-                                st.success("✅ Parâmetros detectados na página!")
-                                with st.expander("📋 Ver Descrição Extraída"):
-                                    st.text(parametros['descricao_completa'])
-
                                 st.session_state.parametros_extraidos = parametros
+                            else:
+                                st.session_state.parametros_extraidos = {
+                                    'configuracao_mao': [],
+                                    'orientacao': 'Palma para cima',
+                                    'ponto_articulacao': 'Espaço neutro',
+                                    'movimento': [],
+                                    'descricao_completa': texto_pagina[:800] if texto_pagina else ""
+                                }
+
+                    if st.session_state.imagem_ref_path and f"capovilla_p{num_pagina}.png" in st.session_state.imagem_ref_path:
+                        st.image(st.session_state.imagem_ref_path, caption=f"Página {num_pagina}", use_container_width=True)
+
+            # Mostrar descrição extraída se disponível
+            if st.session_state.parametros_extraidos and st.session_state.parametros_extraidos.get('descricao_completa'):
+                st.success("✅ Descrição do sinal extraída automaticamente! (Preenchimento manual dispensado)")
+                with st.expander("📋 Ver Descrição Extraída"):
+                    st.write(st.session_state.parametros_extraidos['descricao_completa'])
 
         st.divider()
 
-        # Parâmetros do Sinal
-        st.subheader("🔧 Parâmetros do Sinal")
+        # --------------------------------------------------------------------
+        # PARÂMETROS DO SINAL (OPCIONAIS / AUTOPREENCHIDOS)
+        # --------------------------------------------------------------------
+        st.subheader("🔧 Parâmetros do Sinal (Opcional)")
 
-        # Se há parâmetros extraídos do PDF, usar como valores padrão
         if st.session_state.parametros_extraidos:
-            st.info("📝 Parâmetros preenchidos automaticamente do PDF")
+            st.info("📝 Parâmetros autopreenchidos a partir da descrição do sinal.")
             params = st.session_state.parametros_extraidos
-            configuracoes_default = params.get('configuracao_mao', [])
+            configuracoes_default = [c for c in params.get('configuracao_mao', []) if c in CONFIGURACOES_MAO]
             orientacao_default = params.get('orientacao', 'Palma para cima')
             ponto_default = params.get('ponto_articulacao', 'Espaço neutro')
-            movimentos_default = params.get('movimento', [])
+            movimentos_default = [m for m in params.get('movimento', []) if m in TIPOS_MOVIMENTO]
             obs_default = params.get('descricao_completa', '')
         else:
+            st.caption("Preencha apenas se desejar detalhar manualmente o sinal.")
             configuracoes_default = []
             orientacao_default = "Palma para cima"
             ponto_default = "Espaço neutro"
@@ -466,59 +534,35 @@ def main():
 
         termo = st.text_input(
             "Nome do Sinal",
-            placeholder="Ex: CASA, ESTUDAR, FELIZ",
-            key="termo"
+            value=st.session_state.termo_atual,
+            placeholder="Ex: À TOA, CASA, ESTUDAR",
+            key="termo_input"
         )
+        st.session_state.termo_atual = termo
 
-        categoria = st.selectbox(
-            "Categoria",
-            CATEGORIAS,
-            key="categoria"
-        )
-
-        configuracoes = st.multiselect(
-            "Configuração de Mão",
-            CONFIGURACOES_MAO,
-            default=configuracoes_default,
-            key="config_mao"
-        )
-
-        ponto_articulacao = st.selectbox(
-            "Ponto de Articulação",
-            PONTOS_ARTICULACAO,
-            index=PONTOS_ARTICULACAO.index(ponto_default) if ponto_default in PONTOS_ARTICULACAO else 0,
-            key="ponto_art"
-        )
-
-        movimentos = st.multiselect(
-            "Movimento",
-            TIPOS_MOVIMENTO,
-            default=movimentos_default,
-            key="movimentos"
-        )
-
-        orientacao = st.selectbox(
-            "Orientação",
-            ORIENTACOES,
-            index=ORIENTACOES.index(orientacao_default) if orientacao_default in ORIENTACOES else 0,
-            key="orientacao"
-        )
-
-        expressoes = st.multiselect(
-            "Expressão Facial",
-            EXPRESSOES,
-            default=["Neutra"],
-            key="expressoes"
-        )
+        with st.expander("⚙️ Ajustar Parâmetros Detalhados (Opcional)", expanded=not bool(st.session_state.parametros_extraidos)):
+            categoria = st.selectbox("Categoria", CATEGORIAS, key="categoria")
+            configuracoes = st.multiselect("Configuração de Mão", CONFIGURACOES_MAO, default=configuracoes_default)
+            ponto_articulacao = st.selectbox(
+                "Ponto de Articulação",
+                PONTOS_ARTICULACAO,
+                index=PONTOS_ARTICULACAO.index(ponto_default) if ponto_default in PONTOS_ARTICULACAO else 0
+            )
+            movimentos = st.multiselect("Movimento", TIPOS_MOVIMENTO, default=movimentos_default)
+            orientacao = st.selectbox(
+                "Orientação",
+                ORIENTACOES,
+                index=ORIENTACOES.index(orientacao_default) if orientacao_default in ORIENTACOES else 0
+            )
+            expressoes = st.multiselect("Expressão Facial", EXPRESSOES, default=["Neutra"])
 
         observacoes = st.text_area(
-            "Observações",
+            "Descrição / Observações do Sinal",
             value=obs_default,
-            placeholder="Detalhes adicionais sobre o sinal...",
-            key="observacoes"
+            height=120,
+            placeholder="A descrição extraída do dicionário ou da imagem aparecerá aqui automaticamente..."
         )
 
-        # Botão para limpar parâmetros extraídos
         if st.session_state.parametros_extraidos:
             if st.button("🔄 Limpar Parâmetros Extraídos"):
                 st.session_state.parametros_extraidos = None
@@ -531,7 +575,6 @@ def main():
         st.header("👤 Item B: Personagem Base")
         st.markdown("*Seu modelo 2D padronizado*")
 
-        # Opção: usar personagem existente ou fazer upload
         opcao_personagem = st.radio(
             "Escolha o personagem",
             ["Usar personagem salvo", "Fazer upload"],
@@ -550,11 +593,9 @@ def main():
                     key="personagem_sel"
                 )
                 imagem_personagem_path = f"assets/personagens/{personagem_selecionado}"
-
-                # Exibir preview
                 st.image(imagem_personagem_path, caption="Personagem Selecionado", use_container_width=True)
             else:
-                st.info("ℹ️ Nenhum personagem salvo. Faça upload primeiro.")
+                st.info("ℹ️ Nenhum personagem salvo ainda. Escolha 'Fazer upload' acima.")
 
         else:  # Upload
             uploaded_char = st.file_uploader(
@@ -564,10 +605,9 @@ def main():
             )
 
             if uploaded_char:
-                # Salvar
                 nome_personagem = st.text_input(
                     "Nome do personagem (para salvar)",
-                    placeholder="Ex: personagem_padrao",
+                    placeholder="Ex: Jefferson",
                     key="nome_personagem"
                 )
 
@@ -579,23 +619,20 @@ def main():
                     st.success(f"✅ Personagem salvo: {nome_personagem}")
                     st.image(imagem_personagem_path, caption="Personagem", use_container_width=True)
                 else:
-                    # Usar temporariamente
-                    imagem_personagem_path = f"assets/personagens/temp_char_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    imagem_personagem_path = "assets/personagens/temp_char.png"
                     with open(imagem_personagem_path, "wb") as f:
                         f.write(uploaded_char.getbuffer())
-                    st.image(imagem_personagem_path, caption="Personagem (temp)", use_container_width=True)
+                    st.image(imagem_personagem_path, caption="Personagem (temporário)", use_container_width=True)
 
         st.divider()
 
-        # Informações do personagem
         with st.expander("ℹ️ Dicas de Personagem"):
             st.markdown("""
             **Características ideais:**
             - Fundo transparente ou neutro
-            - Pose neutra (braços ao lado do corpo)
+            - Pose neutra (braços visíveis)
             - Proporções anatômicas claras
             - Estilo 2D consistente
-            - Alta resolução
             """)
 
     # ------------------------------------------------------------------------
@@ -605,70 +642,98 @@ def main():
         st.header("✨ Item C: Resultado Gerado")
         st.markdown("*Personagem executando o sinal*")
 
-        # Validação antes de gerar
-        pode_gerar = all([
-            imagem_ref_path,
-            imagem_personagem_path,
-            termo,
-            api_key
-        ])
+        # Verificar requisitos essenciais (sem travar por api_key ou parâmetros opcionais)
+        tem_referencia = bool(st.session_state.imagem_ref_path and os.path.exists(st.session_state.imagem_ref_path))
+        tem_personagem = bool(imagem_personagem_path and os.path.exists(imagem_personagem_path))
+        tem_termo_ou_desc = bool(termo.strip() or observacoes.strip() or st.session_state.parametros_extraidos)
+
+        itens_faltando = []
+        if not tem_referencia:
+            itens_faltando.append("Imagem de Referência (Coluna 1)")
+        if not tem_personagem:
+            itens_faltando.append("Personagem Base (Coluna 2)")
+        if not tem_termo_ou_desc:
+            itens_faltando.append("Nome do Sinal ou Descrição (Coluna 1)")
+
+        pode_gerar = (len(itens_faltando) == 0)
 
         if not pode_gerar:
-            st.warning("⚠️ Complete os campos obrigatórios nas colunas 1 e 2")
+            st.warning(f"⚠️ **Para liberar a geração, falta:** {', '.join(itens_faltando)}")
+        else:
+            st.success("✅ Tudo pronto para gerar a ilustração!")
 
-        # Botão de geração
-        if st.button("🚀 Gerar Ilustração", disabled=not pode_gerar, type="primary"):
-            with st.spinner("🎨 Gerando ilustração com IA..."):
+        # Função interna para construir o prompt
+        def construir_prompt_atual():
+            nome_sinal_final = termo.strip() if termo.strip() else "SINAL_LIBRAS"
+            st.session_state.prompt_engine.modo_otimizado = modo_otimizado
+            if modo_otimizado:
+                return st.session_state.prompt_engine.gerar_prompt_otimizado(
+                    termo=nome_sinal_final,
+                    configuracao_mao=configuracoes,
+                    ponto_articulacao=ponto_articulacao,
+                    movimento=movimentos,
+                    orientacao=orientacao,
+                    expressao=expressoes,
+                    observacoes=observacoes
+                )
+            else:
+                return st.session_state.prompt_engine.gerar_prompt_completo(
+                    termo=nome_sinal_final,
+                    configuracao_mao=configuracoes,
+                    ponto_articulacao=ponto_articulacao,
+                    movimento=movimentos,
+                    orientacao=orientacao,
+                    expressao=expressoes,
+                    observacoes=observacoes
+                )
+
+        # Botão principal de geração
+        if st.button("🚀 Gerar Ilustração", disabled=not pode_gerar, type="primary", use_container_width=True):
+            st.session_state.mostrar_fallback_free = False
+            st.session_state.erro_geracao_msg = ""
+
+            with st.spinner("🎨 Processando ilustração com IA..."):
                 try:
-                    # Atualizar PromptEngine com modo de otimização
-                    st.session_state.prompt_engine.modo_otimizado = modo_otimizado
-
-                    # Gerar o prompt
-                    if modo_otimizado:
-                        prompt = st.session_state.prompt_engine.gerar_prompt_otimizado(
-                            termo=termo,
-                            configuracao_mao=configuracoes,
-                            ponto_articulacao=ponto_articulacao,
-                            movimento=movimentos,
-                            orientacao=orientacao,
-                            expressao=expressoes,
-                            observacoes=observacoes
-                        )
-                        st.info("🚀 Prompt otimizado (RTK: Token Saver ativado)")
-                    else:
-                        prompt = st.session_state.prompt_engine.gerar_prompt_completo(
-                            termo=termo,
-                            configuracao_mao=configuracoes,
-                            ponto_articulacao=ponto_articulacao,
-                            movimento=movimentos,
-                            orientacao=orientacao,
-                            expressao=expressoes,
-                            observacoes=observacoes
-                        )
-
+                    prompt = construir_prompt_atual()
                     st.session_state.ultimo_prompt = prompt
+                    nome_base = (termo.strip() or "sinal").lower().replace(' ', '_')
+                    nome_arquivo = f"{nome_base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
 
-                    # Gerar imagem conforme modo
-                    nome_arquivo = f"{termo.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-
-                    if provider == "smart-router":
-                        # Modo Smart Router com Auto-Fallback
-                        st.info("🔄 Smart Router: Tentando múltiplos provedores...")
-
-                        ai_gen = AIGenerator(provider="smart-router", config=router_config)
-
-                        sucesso, mensagem, caminho_saida = ai_gen.gerar_imagem(
-                            prompt=prompt,
-                            imagem_referencia_a=imagem_ref_path,
-                            imagem_personagem_b=imagem_personagem_path,
-                            output_dir="output",
-                            nome_arquivo=nome_arquivo
-                        )
+                    # Verificar se o usuário tentou um provider pago sem chave configurada
+                    if provider != "pollinations" and provider != "smart-router" and not api_key:
+                        st.session_state.erro_geracao_msg = f"Nenhuma API Key foi informada para o provedor '{provider}'."
+                        st.session_state.mostrar_fallback_free = True
+                    elif provider == "smart-router":
+                        tem_alguma_chave = any([
+                            router_config.get("openai_key"),
+                            router_config.get("gemini_key"),
+                            router_config.get("replicate_key"),
+                            router_config.get("huggingface_key"),
+                            router_config.get("custom_proxy_key")
+                        ])
+                        if not tem_alguma_chave:
+                            st.session_state.erro_geracao_msg = "Nenhuma API Key paga/externa foi configurada nas Configurações de IA."
+                            st.session_state.mostrar_fallback_free = True
+                        else:
+                            # Tenta apenas nos provedores com chave antes de perguntar sobre o Free
+                            config_sem_free = dict(router_config)
+                            config_sem_free["priority_order"] = ["custom_proxy", "gemini", "huggingface", "openai", "replicate"]
+                            ai_gen = AIGenerator(provider="smart-router", config=config_sem_free)
+                            sucesso, mensagem, caminho_saida = ai_gen.gerar_imagem(
+                                prompt=prompt,
+                                imagem_referencia_a=st.session_state.imagem_ref_path,
+                                imagem_personagem_b=imagem_personagem_path,
+                                output_dir="output",
+                                nome_arquivo=nome_arquivo
+                            )
+                            if sucesso:
+                                st.success(f"✅ {mensagem}")
+                                st.session_state.imagem_gerada = caminho_saida
+                            else:
+                                st.session_state.erro_geracao_msg = mensagem
+                                st.session_state.mostrar_fallback_free = True
                     else:
-                        # Modo Provider Específico (legado)
-                        st.info(f"🎯 Usando provider: {provider}")
-
-                        # Criar config para o provider específico
+                        # Execução direta (Pollinations ou Provider Específico com chave)
                         specific_config = {}
                         if provider == "openai":
                             specific_config = {"openai_key": api_key, "priority_order": ["openai"]}
@@ -682,23 +747,60 @@ def main():
                             specific_config = {"priority_order": ["pollinations"]}
 
                         ai_gen = AIGenerator(provider="smart-router", config=specific_config)
-
                         sucesso, mensagem, caminho_saida = ai_gen.gerar_imagem(
                             prompt=prompt,
-                            imagem_referencia_a=imagem_ref_path,
+                            imagem_referencia_a=st.session_state.imagem_ref_path,
                             imagem_personagem_b=imagem_personagem_path,
                             output_dir="output",
                             nome_arquivo=nome_arquivo
                         )
 
-                    if sucesso:
-                        st.success(f"✅ {mensagem}")
-                        st.session_state.imagem_gerada = caminho_saida
-                    else:
-                        st.error(f"❌ {mensagem}")
+                        if sucesso:
+                            st.success(f"✅ {mensagem}")
+                            st.session_state.imagem_gerada = caminho_saida
+                        else:
+                            st.session_state.erro_geracao_msg = mensagem
+                            if provider != "pollinations":
+                                st.session_state.mostrar_fallback_free = True
+                            else:
+                                st.error(f"❌ {mensagem}")
 
                 except Exception as e:
-                    st.error(f"❌ Erro: {str(e)}")
+                    st.session_state.erro_geracao_msg = str(e)
+                    st.session_state.mostrar_fallback_free = True
+
+        # --------------------------------------------------------------------
+        # PERGUNTA INTERATIVA DE FALLBACK PARA POLLINATIONS.AI (FREE)
+        # --------------------------------------------------------------------
+        if st.session_state.mostrar_fallback_free:
+            st.error(f"⚠️ **Aviso das Configurações de IA:** {st.session_state.erro_geracao_msg}")
+            st.info("💡 **Deseja gerar esta ilustração agora no modo 100% Gratuito usando ✅ Pollinations.ai (Flux)?**")
+
+            if st.button("🌸 Sim, gerar no modo Free (Pollinations.ai)", type="primary", use_container_width=True):
+                with st.spinner("🌸 Gerando gratuitamente com Pollinations.ai (Flux)..."):
+                    try:
+                        prompt = st.session_state.ultimo_prompt or construir_prompt_atual()
+                        nome_base = (termo.strip() or "sinal").lower().replace(' ', '_')
+                        nome_arquivo = f"{nome_base}_free_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+
+                        free_config = {"priority_order": ["pollinations"]}
+                        ai_gen = AIGenerator(provider="smart-router", config=free_config)
+                        sucesso, mensagem, caminho_saida = ai_gen.gerar_imagem(
+                            prompt=prompt,
+                            imagem_referencia_a=st.session_state.imagem_ref_path,
+                            imagem_personagem_b=imagem_personagem_path,
+                            output_dir="output",
+                            nome_arquivo=nome_arquivo
+                        )
+
+                        if sucesso:
+                            st.session_state.mostrar_fallback_free = False
+                            st.success(f"✅ Gerado com sucesso no modo Free! ({mensagem})")
+                            st.session_state.imagem_gerada = caminho_saida
+                        else:
+                            st.error(f"❌ Erro no Pollinations.ai: {mensagem}")
+                    except Exception as e:
+                        st.error(f"❌ Erro ao gerar no modo Free: {str(e)}")
 
         # Exibir imagem gerada
         if st.session_state.imagem_gerada:
@@ -709,13 +811,10 @@ def main():
                     use_container_width=True
                 )
 
-                # Opções pós-geração
                 st.divider()
-
                 col3a, col3b = st.columns(2)
 
                 with col3a:
-                    # Download
                     with open(st.session_state.imagem_gerada, "rb") as file:
                         st.download_button(
                             label="💾 Download",
@@ -725,10 +824,9 @@ def main():
                         )
 
                 with col3b:
-                    # Salvar no catálogo
                     if st.button("📚 Salvar no Catálogo"):
                         novo_sinal = Sinal(
-                            termo=termo,
+                            termo=termo or "Sinal",
                             categoria=categoria,
                             configuracao_mao=configuracoes,
                             ponto_articulacao=ponto_articulacao,
@@ -744,7 +842,6 @@ def main():
                         else:
                             st.warning("⚠️ Sinal já existe no catálogo")
 
-        # Exibir prompt usado
         if st.session_state.ultimo_prompt:
             with st.expander("🔍 Ver Prompt Usado"):
                 st.code(st.session_state.ultimo_prompt, language="text")
@@ -752,43 +849,26 @@ def main():
     # ========================================================================
     # SEÇÃO INFERIOR: Visualização do Catálogo
     # ========================================================================
-
     st.divider()
     st.header("📚 Catálogo de Sinais")
 
     sinais = st.session_state.catalogo.listar_todos()
 
     if sinais:
-        # Filtros
         col_f1, col_f2 = st.columns(2)
-
         with col_f1:
-            filtro_cat = st.selectbox(
-                "Filtrar por categoria",
-                ["Todas"] + CATEGORIAS,
-                key="filtro_cat"
-            )
-
+            filtro_cat = st.selectbox("Filtrar por categoria", ["Todas"] + CATEGORIAS, key="filtro_cat")
         with col_f2:
-            busca_termo = st.text_input(
-                "Buscar termo",
-                placeholder="Digite o nome do sinal...",
-                key="busca_termo"
-            )
+            busca_termo = st.text_input("Buscar termo", placeholder="Digite o nome do sinal...", key="busca_termo")
 
-        # Aplicar filtros
         sinais_filtrados = sinais
-
         if filtro_cat != "Todas":
             sinais_filtrados = [s for s in sinais_filtrados if s.categoria == filtro_cat]
-
         if busca_termo:
             sinais_filtrados = [s for s in sinais_filtrados if busca_termo.lower() in s.termo.lower()]
 
-        # Exibir em grid
         if sinais_filtrados:
             cols_grid = st.columns(4)
-
             for idx, sinal in enumerate(sinais_filtrados):
                 with cols_grid[idx % 4]:
                     if sinal.caminho_imagem and os.path.exists(sinal.caminho_imagem):
