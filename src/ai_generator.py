@@ -1,6 +1,7 @@
 """
 Gerador Multimodal Real de Ilustrações de Libras
-Fusão de Item A (Referência Recortada) + Item B (Ficha de Personagem 2D) via Google Gemini API
+Fusão de Item A (Referência) + Item B (Ficha de Personagem 2D)
+Provedores: Gemini (Multimodal), Replicate (InstantCharacter), HuggingFace, OpenAI.
 """
 import os
 import io
@@ -8,73 +9,10 @@ import re
 import base64
 import urllib.parse
 import requests
+import time
 from pathlib import Path
 from PIL import Image
-import replicate
-import base64
 
-# Dentro do seu app.py ou ai_generator.py:
-prompt_instant = st.session_state.prompt_engine.gerar_prompt_instant_character(
-    termo=termo,
-    configuracao_mao=configuracoes,
-    ponto_articulacao=ponto_articulacao,
-    movimento=movimentos,
-    orientacao=orientacao,
-    expressao=expressoes,
-    observacoes=observacoes
-)
-
-# E então enviar 'prompt_instant' para o Replicate (InstantCharacter)
-
-# ... (dentro da classe AIGenerator) ...
-
-    def _gerar_com_replicate(
-        self, 
-        api_key: str, 
-        prompt: str, 
-        img_ref: str, 
-        img_char: str, 
-        caminho_saida: str
-    ) -> tuple:
-        """
-        Gera a imagem usando o InstantCharacter via Replicate.
-        Ele mantém a identidade do personagem (Item B) e aplica a pose do sinal (Item A).
-        """
-        os.environ["REPLICATE_API_TOKEN"] = api_key
-        
-        try:
-            # Abre as imagens para enviar para a API
-            with open(img_ref, "rb") as f_ref, open(img_char, "rb") as f_char:
-                output = replicate.run(
-                    # Modelo InstantCharacter no Replicate (versão mais recente)
-                    "bytedance/instant-character:latest", 
-                    input={
-                        "prompt": prompt,
-                        "subject_image": f_char,       # Item B: O seu personagem base
-                        "control_image": f_ref,        # Item A: O sinal de Libras de referência
-                        "width": 1024,
-                        "height": 1024,
-                        "num_inference_steps": 30
-                    }
-                )
-
-            # O Replicate retorna uma URL da imagem gerada
-            if isinstance(output, list) and len(output) > 0:
-                img_url = output[0]
-            else:
-                img_url = output
-
-            # Baixa a imagem gerada para o seu computador
-            resp = requests.get(img_url, timeout=30)
-            if resp.status_code == 200:
-                with open(caminho_saida, "wb") as f:
-                    f.write(resp.content)
-                return True, "Gerado via InstantCharacter (Replicate)"
-                
-            return False, "Falha ao baixar imagem do Replicate."
-
-        except Exception as e:
-            return False, f"Erro no Replicate: {str(e)[:100]}"
 
 class SmartAIRouter:
     def __init__(self, config: dict = None):
@@ -82,20 +20,20 @@ class SmartAIRouter:
 
     def get_provider_status(self) -> dict:
         gemini_key = self.config.get("gemini_key") or os.getenv("GEMINI_API_KEY")
+        replicate_key = self.config.get("replicate_key") or os.getenv("REPLICATE_API_TOKEN")
         hf_key = self.config.get("huggingface_key") or os.getenv("HUGGINGFACE_TOKEN")
         openai_key = self.config.get("openai_key") or os.getenv("OPENAI_API_KEY")
-        replicate_key = self.config.get("replicate_key") or os.getenv("REPLICATE_API_TOKEN")
 
         return {
             "gemini": {
-                "name": "1️⃣ Google Gemini Multimodal (AI Studio)",
+                "name": "1️⃣ Google Gemini Multimodal",
                 "ready": bool(gemini_key),
                 "requires_key": True
             },
-            "pollinations": {
-                "name": "2️⃣ Pollinations.ai (Flux - Free)",
-                "ready": True,
-                "requires_key": False
+            "replicate": {
+                "name": "2️⃣ Replicate (InstantCharacter)",
+                "ready": bool(replicate_key),
+                "requires_key": True
             },
             "huggingface": {
                 "name": "3️⃣ HuggingFace (FLUX.1-schnell)",
@@ -105,11 +43,6 @@ class SmartAIRouter:
             "openai": {
                 "name": "4️⃣ OpenAI (DALL-E 3)",
                 "ready": bool(openai_key),
-                "requires_key": True
-            },
-            "replicate": {
-                "name": "5️⃣ Replicate (Flux)",
-                "ready": bool(replicate_key),
                 "requires_key": True
             }
         }
@@ -208,9 +141,10 @@ class AIGenerator:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         caminho_saida = str(Path(output_dir) / nome_arquivo)
 
+        # Nova ordem: Gemini -> Replicate -> HuggingFace -> OpenAI
         ordem = self.config.get(
             "priority_order",
-            ["gemini", "huggingface", "openai", "replicate", "pollinations"]
+            ["gemini", "replicate", "huggingface", "openai"]
         )
 
         erros_acumulados = []
@@ -227,7 +161,7 @@ class AIGenerator:
                     return True, msg, caminho_saida
                 erros_acumulados.append(f"Gemini: {msg}")
 
-                        elif prov == "replicate":
+            elif prov == "replicate":
                 key = self.config.get("replicate_key") or os.getenv("REPLICATE_API_TOKEN")
                 if not key:
                     continue
@@ -380,55 +314,83 @@ class AIGenerator:
         self.config["ultima_descricao_vision"] = descricao_visual
         return False, " | ".join(erros[:2]) if erros else "Modelo de imagem não habilitado nesta chave."
 
-    def _gerar_com_pollinations(self, prompt: str, img_ref: str, img_char: str, caminho_saida: str) -> tuple:
-        gemini_key = self.config.get("gemini_key") or os.getenv("GEMINI_API_KEY")
-        descricao_vision = self.config.get("ultima_descricao_vision", "")
+    def _gerar_com_replicate(self, api_key: str, prompt: str, img_ref: str, img_char: str, caminho_saida: str) -> tuple:
+        """
+        Gera imagem usando a API do Replicate (Modelo InstantCharacter).
+        Usa a biblioteca requests em vez do SDK do Replicate para manter o código leve.
+        """
+        if not img_ref or not img_char:
+            return False, "As duas imagens (Referência e Personagem) são obrigatórias para o InstantCharacter."
 
-        if not descricao_vision and gemini_key and img_ref:
-            descricao_vision = self._analisar_sinal_com_gemini_vision(gemini_key, img_ref, img_char, prompt)
+        try:
+            b64_ref, mime_ref = self._encode_image_b64(img_ref)
+            b64_char, mime_char = self._encode_image_b64(img_char)
+            
+            # O Replicate aceita imagens no formato Data URI
+            ref_data_uri = f"data:{mime_ref};base64,{b64_ref}"
+            char_data_uri = f"data:{mime_char};base64,{b64_char}"
 
-        base_pose = descricao_vision if descricao_vision else re.sub(r'[^a-zA-Z0-9\s,]', ' ', prompt)[:220]
-        base_pose_limpa = " ".join(re.sub(r'[^a-zA-Z0-9\s,.-]', ' ', base_pose).split())[:320]
+            # Endpoint da API do Replicate para o InstantCharacter
+            url = "https://api.replicate.com/v1/models/bytedance/instant-character/predictions"
+            headers = {
+                "Authorization": f"Token {api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "input": {
+                    "prompt": prompt,
+                    "subject_image": char_data_uri,   # Item B (Seu personagem)
+                    "control_image": ref_data_uri,    # Item A (O sinal)
+                    "width": 1024,
+                    "height": 1024
+                }
+            }
 
-        estilo_personagem_fixo = (
-            "clean 2D vector didactic flashcard illustration, flat cel shading, sharp black outlines, "
-            "solid white background, waist-up front view of a slim Brazilian male teacher with short curly dark hair, "
-            "round glasses, short goatee beard, wearing a plain black v-neck t-shirt, clear 5 fingers hand gesture: "
-        )
+            # 1. Cria a predição
+            resp = requests.post(url, headers=headers, json=payload, timeout=30)
+            if resp.status_code not in (200, 201):
+                return False, f"Erro API Replicate (HTTP {resp.status_code}): {resp.text[:100]}"
 
-        texto_final = f"{estilo_personagem_fixo} {base_pose_limpa}, no frame, no circle, no text"
-        prompt_encoded = urllib.parse.quote(texto_final)
+            prediction = resp.json()
+            get_url = prediction.get("urls", {}).get("get")
+            
+            if not get_url:
+                return False, "Não foi possível obter URL de polling no Replicate."
 
-        pollinations_key = self.config.get("pollinations_key") or os.getenv("POLLINATIONS_API_KEY")
-        if not pollinations_key:
-            try:
-                import streamlit as st
-                if hasattr(st, "secrets") and "POLLINATIONS_API_KEY" in st.secrets:
-                    pollinations_key = st.secrets["POLLINATIONS_API_KEY"]
-            except Exception:
-                pass
-
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        if pollinations_key:
-            headers["Authorization"] = f"Bearer {pollinations_key}"
-
-        tentativas = [
-            f"https://image.pollinations.ai/prompt/{prompt_encoded}?model=flux&width=768&height=768&nologo=true&seed=42",
-            f"https://image.pollinations.ai/prompt/{prompt_encoded}?model=turbo&width=768&height=768&nologo=true"
-        ]
-
-        for url in tentativas:
-            try:
-                r = requests.get(url, headers=headers, timeout=55)
-                if r.status_code == 200 and len(r.content) > 1500:
-                    with open(caminho_saida, "wb") as f:
-                        f.write(r.content)
-                    extra = " + Leitura Visual Gemini" if descricao_vision else ""
-                    return True, f"Gerado via Pollinations.ai (Estilo Vetorial 2D{extra})"
-            except Exception:
-                continue
-
-        return False, "Servidores do Pollinations temporariamente ocupados."
+            # 2. Polling (Aguardar a geração da imagem)
+            # O Replicate demora cerca de 10 a 30 segundos para gerar
+            for _ in range(30): # Tentar por 60 segundos (30 * 2s)
+                time.sleep(2)
+                poll_resp = requests.get(get_url, headers=headers, timeout=15)
+                if poll_resp.status_code == 200:
+                    poll_data = poll_resp.json()
+                    status = poll_data.get("status")
+                    
+                    if status == "succeeded":
+                        output = poll_data.get("output")
+                        if isinstance(output, list) and len(output) > 0:
+                            img_url = output[0]
+                        elif isinstance(output, str):
+                            img_url = output
+                        else:
+                            return False, "Formato de saída do Replicate desconhecido."
+                        
+                        # 3. Baixa a imagem final
+                        img_resp = requests.get(img_url, timeout=30)
+                        if img_resp.status_code == 200:
+                            with open(caminho_saida, "wb") as f:
+                                f.write(img_resp.content)
+                            return True, "Gerado via InstantCharacter (Replicate)"
+                        return False, "Falha ao baixar imagem gerada do Replicate."
+                        
+                    elif status == "failed":
+                        erro_msg = poll_data.get("error", "Motivo desconhecido")
+                        return False, f"Replicate falhou: {erro_msg}"
+            
+            return False, "Timeout: O Replicate demorou muito para responder."
+            
+        except Exception as e:
+            return False, f"Erro de conexão Replicate: {str(e)[:100]}"
 
     def _gerar_com_huggingface(self, token: str, prompt: str, caminho_saida: str) -> tuple:
         url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
