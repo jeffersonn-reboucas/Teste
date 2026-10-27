@@ -66,7 +66,6 @@ class AIGenerator:
             return b64_data, "image/jpeg"
 
     def listar_modelos_gemini_disponiveis(self, api_key: str) -> list:
-        """Consulta a API do Google AI Studio para descobrir os nomes exatos dos modelos ativos na conta"""
         url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
         try:
             resp = requests.get(url, timeout=15)
@@ -76,11 +75,8 @@ class AIGenerator:
         except Exception:
             pass
         return []
-def extrair_parametros_visuais_portugues(self, api_key: str, img_path: str, termo: str = "") -> dict:
-        """
-        Olha para a imagem .jpg do sinal (com ou sem texto escrito nela) usando o Gemini Vision
-        e devolve a descrição técnica em Português + parâmetros estruturados.
-        """
+
+    def extrair_parametros_visuais_portugues(self, api_key: str, img_path: str, termo: str = "") -> dict:
         if not api_key or not img_path or not os.path.exists(img_path):
             return None
 
@@ -136,6 +132,7 @@ def extrair_parametros_visuais_portugues(self, api_key: str, img_path: str, term
             except Exception:
                 continue
         return None
+
     def gerar_imagem(
         self,
         prompt: str,
@@ -196,10 +193,6 @@ def extrair_parametros_visuais_portugues(self, api_key: str, img_path: str, term
         return False, resumo_erros, None
 
     def _analisar_sinal_com_gemini_vision(self, api_key: str, img_ref: str, img_char: str, prompt_usuario: str) -> str:
-        """
-        Usa o Gemini Vision (100% gratuito) para ler o recorte do Capovilla + Ficha do Personagem
-        e produzir uma descrição anatômica cirúrgica em inglês para qualquer gerador de imagem.
-        """
         partes = []
         if img_ref and os.path.exists(img_ref):
             b64_ref, mime_ref = self._encode_image_b64(img_ref)
@@ -226,18 +219,12 @@ def extrair_parametros_visuais_portugues(self, api_key: str, img_path: str, term
         return ""
 
     def _gerar_com_gemini(self, api_key: str, prompt: str, img_ref: str, img_char: str, caminho_saida: str) -> tuple:
-        """
-        1. Descobre automaticamente os modelos de geração de imagem ativos na chave do usuário.
-        2. Envia a Ficha de Personagem (Item B) + Recorte do Sinal (Item A) juntos.
-        """
         modelos_conta = self.listar_modelos_gemini_disponiveis(api_key)
 
-        # Filtrar modelos capazes de gerar imagem nativamente (Nano Banana / Flash Image / Imagen)
         candidatos_img = [
             m for m in modelos_conta
             if ("image" in m.lower() or "exp" in m.lower()) and "embedding" not in m.lower()
         ]
-        # Garantir modelos conhecidos no topo da tentativa
         for padrao in [
             "gemini-2.0-flash-preview-image-generation",
             "gemini-2.0-flash-exp-image-generation",
@@ -294,7 +281,6 @@ def extrair_parametros_visuais_portugues(self, api_key: str, img_path: str, term
             except Exception as e:
                 erros.append(f"{modelo}: {str(e)[:80]}")
 
-        # Tentativa via Imagen 3 enriquecido pelo Gemini Vision (lê a imagem do sinal antes!)
         modelos_imagen = [m for m in modelos_conta if "imagen" in m.lower()]
         if not modelos_imagen:
             modelos_imagen = ["imagen-3.0-generate-002"]
@@ -324,15 +310,10 @@ def extrair_parametros_visuais_portugues(self, api_key: str, img_path: str, term
             except Exception:
                 pass
 
-        # Guardar descrição visual para ajudar o fallback Pollinations caso necessário
         self.config["ultima_descricao_vision"] = descricao_visual
         return False, " | ".join(erros[:2]) if erros else "Modelo de imagem não habilitado nesta chave."
 
     def _gerar_com_pollinations(self, prompt: str, img_ref: str, img_char: str, caminho_saida: str) -> tuple:
-        """
-        Usa a análise visual do Gemini Vision (que leu o recorte do Capovilla) + Estilo Ficha 2D
-        para que até o modo Free desenhe o personagem correto!
-        """
         gemini_key = self.config.get("gemini_key") or os.getenv("GEMINI_API_KEY")
         descricao_vision = self.config.get("ultima_descricao_vision", "")
 
