@@ -9,6 +9,33 @@ from pathlib import Path
 from PIL import Image
 import io
 
+# Mapeamento detalhado de configurações de mão para o prompt engine
+CONFIGURACOES_MAO_DETALHADAS = {
+    "A": "Mão fechada em punho com polegar apontando para cima encostado na lateral do indicador",
+    "B": "Mão aberta, quatro dedos estendidos e unidos, polegar flexionado sobre a palma",
+    "C": "Dedos curvados em formato de arco simulando a letra C",
+    "D": "Indicador estendido apontando para cima, demais dedos fechados com o polegar tocando as pontas",
+    "E": "Dedos flexionados com as pontas tocando levemente a ponta do polegar",
+    "F": "Indicador e polegar unidos pelas pontas formando um círculo, outros três dedos estendidos",
+    "G": "Indicador estendido apontando para cima, polegar estendido lateralmente, outros dedos fechados",
+    "I": "Apenas o dedo mínimo estendido para cima, os demais dedos fechados em punho",
+    "L": "Indicador e polegar estendidos formando um ângulo de 90 graus (formato de L)",
+    "M": "Três dedos (indicador, médio, anelar) voltados para baixo sobre o polegar",
+    "N": "Dois dedos (indicador e médio) voltados para baixo sobre o polegar",
+    "O": "Todas as pontas dos dedos unidas tocando o polegar, formando um círculo (letra O)",
+    "P": "Formato de K apontando para baixo ou horizontalmente",
+    "Q": "Indicador e polegar voltados para baixo em pinça aberta",
+    "R": "Dedo médio cruzado sobre o dedo indicador, ambos estendidos",
+    "S": "Mão fechada em punho com o polegar sobreposto na frente dos dedos indicador e médio",
+    "T": "Polegar posicionado entre o indicador e o dedo médio com a mão em punho",
+    "U": "Indicador e médio estendidos e colados verticalmente",
+    "V": "Indicador e médio estendidos e separados em formato de V",
+    "W": "Indicador, médio e anelar estendidos e separados em formato de W",
+    "X": "Indicador semiflexionado em forma de gancho",
+    "Y": "Polegar e dedo mínimo estendidos, dedos centrais fechados (formato de telefone)",
+    "Aberta": "Palma aberta com todos os cinco dedos estendidos e separados",
+    "Fechada": "Mão fechada em punho firme"
+}
 
 def normalizar_texto(texto: str) -> str:
     """Remove acentos e converte para minúsculas para buscas precisas"""
