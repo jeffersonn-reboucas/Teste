@@ -1,7 +1,7 @@
 """
 Interface Streamlit para Libras Visual Builder
 Integrado com:
-1. Google Drive Capovilla (A-Z Imagens Individuais)
+1. Google Drive Capovilla (A-Z Imagens Individuais) + Leitura Visual Gemini Vision
 2. Índice SQLite Ultrarrápido (PDF Completo)
 3. Cortador Interativo de Sinal (Crop)
 4. Fusão Multimodal Real via Google Gemini API + Fallback Pollinations Free
@@ -157,7 +157,13 @@ def listar_personagens_disponiveis():
     return []
 
 
-def analisar_imagem_upload(caminho_imagem: str, nome_arquivo: str):
+def analisar_imagem_upload(caminho_imagem: str, nome_arquivo: str, chave_gemini: str = ""):
+    """
+    Tenta extrair os parâmetros da imagem enviada manualmente:
+    1. Via OCR (pytesseract)
+    2. Via busca no PDF pelo nome do arquivo
+    3. Via leitura visual direta com Gemini Vision (mesmo se a imagem só tiver o desenho sem texto!)
+    """
     texto_extraido = ""
     try:
         import pytesseract
@@ -167,6 +173,8 @@ def analisar_imagem_upload(caminho_imagem: str, nome_arquivo: str):
         pass
 
     termo_inferido = Path(nome_arquivo).stem.replace("_", " ").replace("-", " ").strip()
+    if termo_inferido.lower().endswith(" d"):
+        termo_inferido = termo_inferido[:-2].strip()
     if termo_inferido.lower() == "atoa":
         termo_inferido = "à toa"
 
@@ -183,6 +191,21 @@ def analisar_imagem_upload(caminho_imagem: str, nome_arquivo: str):
             parametros = st.session_state.pdf_capovilla.extrair_parametros_sinal(texto_extraido, termo_inferido)
             if parametros:
                 return parametros, termo_inferido.upper()
+
+    # Fallback Infalível: Leitura Visual com Gemini Vision
+    if chave_gemini:
+        try:
+            ai_helper = AIGenerator()
+            params_visuais = ai_helper.extrair_parametros_visuais_portugues(
+                api_key=chave_gemini,
+                img_path=caminho_imagem,
+                termo=termo_inferido
+            )
+            if params_visuais:
+                return params_visuais, termo_inferido.upper()
+        except Exception:
+            pass
+
     return None, termo_inferido.upper()
 
 
@@ -287,7 +310,7 @@ def main():
             "📤 Upload Manual"
         ])
 
-        # ABA 1: DRIVE CAPOVILLA (IMAGENS SEPARADAS A-Z)
+        # ABA 1: DRIVE CAPOVILLA (IMAGENS SEPARADAS A-Z + GEMINI VISION)
         with tab_drive_az:
             st.success("⚡ Conectado à pasta CAPOVILLA (A-Z) do Google Drive")
 
@@ -326,7 +349,7 @@ def main():
                 arq_sel = arquivos_encontrados[idx_arq]
 
                 if st.button("📥 Carregar Imagem Selecionada", type="primary", use_container_width=True):
-                    with st.spinner(f"Baixando {arq_sel['nome_arquivo']}..."):
+                    with st.spinner(f"Baixando {arq_sel['nome_arquivo']} e analisando parâmetros do sinal..."):
                         caminho_jpg = st.session_state.gdrive_catalog.baixar_imagem_sinal(
                             arq_sel['file_id'],
                             arq_sel['nome_arquivo']
@@ -334,15 +357,31 @@ def main():
                         if caminho_jpg:
                             st.session_state.imagem_ref_path = caminho_jpg
                             st.session_state.termo_atual = arq_sel['termo'].upper()
+                            st.session_state.parametros_extraidos = None
 
-                            if st.session_state.pdf_capovilla is not None:
+                            # 1º Tenta buscar a descrição textual no PDF (se já estiver indexado)
+                            if st.session_state.pdf_capovilla is not None and st.session_state.pdf_capovilla.esta_indexado():
                                 res_txt = st.session_state.pdf_capovilla.buscar_termo(arq_sel['termo'], max_resultados=2)
                                 if res_txt:
                                     st.session_state.parametros_extraidos = st.session_state.pdf_capovilla.extrair_parametros_sinal(
                                         res_txt[0]['texto_completo'],
                                         arq_sel['termo']
                                     )
-                            st.success(f"✅ Sinal '{arq_sel['termo'].upper()}' carregado!")
+
+                            # 2º Se a imagem não tinha texto no banco, usa o Gemini Vision para ler o desenho .jpg!
+                            if not st.session_state.parametros_extraidos or not st.session_state.parametros_extraidos.get('descricao_completa'):
+                                chave_ativa = gemini_key or obter_gemini_secret()
+                                if chave_ativa:
+                                    ai_helper = AIGenerator()
+                                    params_visuais = ai_helper.extrair_parametros_visuais_portugues(
+                                        api_key=chave_ativa,
+                                        img_path=caminho_jpg,
+                                        termo=arq_sel['termo']
+                                    )
+                                    if params_visuais:
+                                        st.session_state.parametros_extraidos = params_visuais
+
+                            st.rerun()
             else:
                 st.info("Nenhum arquivo listado nesta letra ainda. Verifique se a pasta do Drive está pública.")
 
@@ -407,7 +446,7 @@ def main():
                         txt_p = extrator.extrair_texto_pagina(num_pagina)
                         st.session_state.parametros_extraidos = extrator.extrair_parametros_sinal(txt_p)
 
-        # ABA 3: UPLOAD MANUAL
+        # ABA 3: UPLOAD MANUAL (TAMBÉM COM LEITURA VISUAL GEMINI VISION)
         with tab_upload:
             uploaded_ref = st.file_uploader("Upload da imagem de referência", type=['png', 'jpg', 'jpeg'])
             if uploaded_ref is not None:
@@ -418,11 +457,16 @@ def main():
                     st.session_state.imagem_ref_path = caminho_salvo
                     st.session_state.ultimo_upload_nome = uploaded_ref.name
 
-                    params_detectados, termo_sugerido = analisar_imagem_upload(caminho_salvo, uploaded_ref.name)
-                    if termo_sugerido:
-                        st.session_state.termo_atual = termo_sugerido
-                    if params_detectados:
-                        st.session_state.parametros_extraidos = params_detectados
+                    with st.spinner("🔎 Analisando imagem e extraindo descrição do sinal..."):
+                        chave_ativa = gemini_key or obter_gemini_secret()
+                        params_detectados, termo_sugerido = analisar_imagem_upload(
+                            caminho_salvo, uploaded_ref.name, chave_ativa
+                        )
+                        if termo_sugerido:
+                            st.session_state.termo_atual = termo_sugerido
+                        if params_detectados:
+                            st.session_state.parametros_extraidos = params_detectados
+                    st.rerun()
 
         # EXIBIÇÃO DA IMAGEM DE REFERÊNCIA + CORTADOR INTERATIVO (CROP)
         if st.session_state.imagem_ref_path and os.path.exists(st.session_state.imagem_ref_path):
@@ -431,6 +475,23 @@ def main():
                 caption=f"Referência Ativa: {st.session_state.termo_atual or 'Sinal'}",
                 use_container_width=True
             )
+
+            # Botão rápido caso queira forçar a releitura visual da imagem atual (ou após recortar)
+            if st.button("👁️ Extrair/Atualizar Descrição Visual desta Imagem (IA)", use_container_width=True):
+                chave_ativa = gemini_key or obter_gemini_secret()
+                if not chave_ativa:
+                    st.warning("⚠️ Insira sua Google Gemini API Key na barra lateral para usar a leitura visual.")
+                else:
+                    with st.spinner("Lendo os detalhes anatômicos do desenho com Gemini Vision..."):
+                        ai_helper = AIGenerator()
+                        params_visuais = ai_helper.extrair_parametros_visuais_portugues(
+                            api_key=chave_ativa,
+                            img_path=st.session_state.imagem_ref_path,
+                            termo=st.session_state.termo_atual
+                        )
+                        if params_visuais:
+                            st.session_state.parametros_extraidos = params_visuais
+                            st.rerun()
 
             with st.expander("✂️ Recortar / Isolar apenas o Desenho do Sinal", expanded=False):
                 st.caption("Use as barras para focar somente no boneco executando o sinal:")
@@ -463,173 +524,4 @@ def main():
                         caminho_crop = "assets/referencias/recorte_focado_atual.png"
                         img_recortada.save(caminho_crop)
                         st.session_state.imagem_ref_path = caminho_crop
-                        st.success("🎯 Recorte aplicado com sucesso!")
-                        st.rerun()
-
-        st.divider()
-        st.subheader("🔧 Parâmetros do Sinal (Opcional)")
-
-        params = st.session_state.parametros_extraidos or {}
-        obs_default = params.get('descricao_completa', '')
-        orientacao_default = params.get('orientacao', 'Palma para cima')
-        ponto_default = params.get('ponto_articulacao', 'Espaço neutro')
-
-        termo = st.text_input("Nome do Sinal", value=st.session_state.termo_atual, placeholder="Ex: À ESQUERDA")
-        st.session_state.termo_atual = termo
-
-        with st.expander("⚙️ Ajustar Parâmetros Manuais (Opcional)", expanded=False):
-            categoria = st.selectbox("Categoria", CATEGORIAS)
-            configuracoes = st.multiselect("Configuração de Mão", CONFIGURACOES_MAO)
-            ponto_articulacao = st.selectbox(
-                "Ponto de Articulação",
-                PONTOS_ARTICULACAO,
-                index=PONTOS_ARTICULACAO.index(ponto_default) if ponto_default in PONTOS_ARTICULACAO else 0
-            )
-            movimentos = st.multiselect("Movimento", TIPOS_MOVIMENTO)
-            orientacao = st.selectbox(
-                "Orientação",
-                ORIENTACOES,
-                index=ORIENTACOES.index(orientacao_default) if orientacao_default in ORIENTACOES else 0
-            )
-            expressoes = st.multiselect("Expressão Facial", EXPRESSOES, default=["Neutra"])
-
-        observacoes = st.text_area("Descrição / Observações do Sinal", value=obs_default, height=100)
-
-    # ------------------------------------------------------------------------
-    # COLUNA 2: Item B (Personagem Base)
-    # ------------------------------------------------------------------------
-    with col2:
-        st.header("👤 Item B: Personagem Base")
-        opcao_personagem = st.radio("Escolha o personagem", ["Usar personagem salvo", "Fazer upload"])
-        imagem_personagem_path = None
-
-        if opcao_personagem == "Usar personagem salvo":
-            personagens = listar_personagens_disponiveis()
-            if personagens:
-                personagem_selecionado = st.selectbox("Selecione o personagem", personagens)
-                imagem_personagem_path = f"assets/personagens/{personagem_selecionado}"
-                st.image(imagem_personagem_path, use_container_width=True)
-            else:
-                st.info("ℹ️ Nenhum personagem salvo ainda. Escolha 'Fazer upload'.")
-        else:
-            uploaded_char = st.file_uploader("Upload do personagem", type=['png', 'jpg', 'jpeg'])
-            if uploaded_char:
-                nome_personagem = st.text_input("Nome do personagem (para salvar)", value="Jefferson")
-                imagem_personagem_path = f"assets/personagens/{nome_personagem or 'temp_char'}.png"
-                with open(imagem_personagem_path, "wb") as f:
-                    f.write(uploaded_char.getbuffer())
-                st.success(f"✅ Personagem carregado: {nome_personagem}")
-                st.image(imagem_personagem_path, use_container_width=True)
-
-    # ------------------------------------------------------------------------
-    # COLUNA 3: Item C (Geração Multimodal + Fallback)
-    # ------------------------------------------------------------------------
-    with col3:
-        st.header("✨ Item C: Resultado Gerado")
-
-        tem_referencia = bool(st.session_state.imagem_ref_path and os.path.exists(st.session_state.imagem_ref_path))
-        tem_personagem = bool(imagem_personagem_path and os.path.exists(imagem_personagem_path))
-        tem_termo_ou_desc = bool(termo.strip() or observacoes.strip())
-
-        faltando = []
-        if not tem_referencia:
-            faltando.append("Imagem de Referência (Coluna 1)")
-        if not tem_personagem:
-            faltando.append("Personagem Base (Coluna 2)")
-        if not tem_termo_ou_desc:
-            faltando.append("Nome do Sinal (Coluna 1)")
-
-        pode_gerar = (len(faltando) == 0)
-
-        if not pode_gerar:
-            st.warning(f"⚠️ **Falta preencher:** {', '.join(faltando)}")
-        else:
-            st.success("✅ Tudo pronto para gerar a ilustração!")
-
-        def construir_prompt_atual():
-            nome_sinal_final = termo.strip() or "SINAL_LIBRAS"
-            if modo_otimizado:
-                return st.session_state.prompt_engine.gerar_prompt_otimizado(
-                    termo=nome_sinal_final, configuracao_mao=configuracoes,
-                    ponto_articulacao=ponto_articulacao, movimento=movimentos,
-                    orientacao=orientacao, expressao=expressoes, observacoes=observacoes
-                )
-            return st.session_state.prompt_engine.gerar_prompt_completo(
-                termo=nome_sinal_final, configuracao_mao=configuracoes,
-                ponto_articulacao=ponto_articulacao, movimento=movimentos,
-                orientacao=orientacao, expressao=expressoes, observacoes=observacoes
-            )
-
-        if st.button("🚀 Gerar Ilustração 2D", disabled=not pode_gerar, type="primary", use_container_width=True):
-            st.session_state.mostrar_fallback_free = False
-            st.session_state.erro_geracao_msg = ""
-
-            with st.spinner("🎨 Analisando imagens e gerando ilustração vetorial 2D..."):
-                prompt = construir_prompt_atual()
-                st.session_state.ultimo_prompt = prompt
-                nome_base = (termo.strip() or "sinal").lower().replace(' ', '_')
-                nome_arquivo = f"{nome_base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-
-                if provider == "pollinations":
-                    cfg = {"gemini_key": gemini_key, "priority_order": ["pollinations"]}
-                elif provider == "smart-router":
-                    cfg = router_config
-                else:
-                    cfg = {"gemini_key": api_key, "priority_order": [provider]}
-
-                ai_gen = AIGenerator(provider="smart-router", config=cfg)
-                sucesso, msg, caminho_saida = ai_gen.gerar_imagem(
-                    prompt=prompt,
-                    imagem_referencia_a=st.session_state.imagem_ref_path,
-                    imagem_personagem_b=imagem_personagem_path,
-                    output_dir="output",
-                    nome_arquivo=nome_arquivo
-                )
-
-                if sucesso:
-                    st.success(f"✅ {msg}")
-                    st.session_state.imagem_gerada = caminho_saida
-                else:
-                    st.session_state.erro_geracao_msg = msg
-                    st.session_state.mostrar_fallback_free = True
-
-        if st.session_state.mostrar_fallback_free:
-            st.error(f"⚠️ **Aviso do Provedor Principal:** {st.session_state.erro_geracao_msg}")
-            st.info("💡 **Deseja gerar agora no modo 100% Gratuito (usando Leitura Visual do Gemini + Pollinations 2D)?**")
-
-            if st.button("🌸 Sim, gerar com Pollinations.ai (Estilo 2D)", type="primary", use_container_width=True):
-                with st.spinner("🌸 Lendo a pose do sinal e gerando o personagem em 2D..."):
-                    prompt = st.session_state.ultimo_prompt or construir_prompt_atual()
-                    nome_arquivo = f"free_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                    ai_gen = AIGenerator(
-                        provider="smart-router",
-                        config={"gemini_key": gemini_key, "priority_order": ["pollinations"]}
-                    )
-                    sucesso, msg, caminho_saida = ai_gen.gerar_imagem(
-                        prompt=prompt,
-                        imagem_referencia_a=st.session_state.imagem_ref_path,
-                        imagem_personagem_b=imagem_personagem_path,
-                        output_dir="output",
-                        nome_arquivo=nome_arquivo
-                    )
-                    if sucesso:
-                        st.session_state.mostrar_fallback_free = False
-                        st.success(f"✅ {msg}")
-                        st.session_state.imagem_gerada = caminho_saida
-                    else:
-                        st.error(f"❌ Falha no Pollinations: {msg}")
-
-        if st.session_state.imagem_gerada and os.path.exists(st.session_state.imagem_gerada):
-            st.image(st.session_state.imagem_gerada, caption="Ilustração Gerada", use_container_width=True)
-            with open(st.session_state.imagem_gerada, "rb") as file:
-                st.download_button(
-                    label="💾 Baixar Ilustração",
-                    data=file,
-                    file_name=os.path.basename(st.session_state.imagem_gerada),
-                    mime="image/png",
-                    use_container_width=True
-                )
-
-
-if __name__ == "__main__":
-    main()
+                        st.success

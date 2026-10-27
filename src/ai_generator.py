@@ -76,7 +76,66 @@ class AIGenerator:
         except Exception:
             pass
         return []
+def extrair_parametros_visuais_portugues(self, api_key: str, img_path: str, termo: str = "") -> dict:
+        """
+        Olha para a imagem .jpg do sinal (com ou sem texto escrito nela) usando o Gemini Vision
+        e devolve a descrição técnica em Português + parâmetros estruturados.
+        """
+        if not api_key or not img_path or not os.path.exists(img_path):
+            return None
 
+        b64_img, mime_img = self._encode_image_b64(img_path)
+        prompt_extracao = (
+            f"Analise esta ilustração do dicionário de Libras para o sinal '{termo}'. "
+            "Se houver texto na imagem, transcreva a descrição da execução do sinal. "
+            "Se houver APENAS o desenho (sem texto), descreva tecnicamente em Português como o sinal é executado "
+            "observando o desenho (configuração das mãos, orientação da palma, ponto de articulação no corpo/espaço, "
+            "movimento indicado pelas setas e expressão facial).\n"
+            "Responda APENAS em formato texto direto e conciso (máximo 3 frases), no estilo do dicionário Capovilla."
+        )
+
+        partes = [
+            {"inlineData": {"mimeType": mime_img, "data": b64_img}},
+            {"text": prompt_extracao}
+        ]
+
+        for mod in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent?key={api_key}"
+            try:
+                r = requests.post(url, json={"contents": [{"parts": partes}]}, timeout=25)
+                if r.status_code == 200:
+                    desc_pt = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    if desc_pt:
+                        desc_lower = desc_pt.lower()
+                        orientacao = "Palma para cima"
+                        if "palma para baixo" in desc_lower:
+                            orientacao = "Palma para baixo"
+                        elif "palma para frente" in desc_lower or "palma para a frente" in desc_lower:
+                            orientacao = "Palma para frente"
+                        elif "palma para trás" in desc_lower or "palma para o corpo" in desc_lower:
+                            orientacao = "Palma para trás"
+                        elif "palma para dentro" in desc_lower or "palma para a esquerda" in desc_lower:
+                            orientacao = "Palma para dentro"
+
+                        ponto = "Espaço neutro"
+                        for p_cand, nome_p in [
+                            ("queixo", "Queixo"), ("testa", "Testa"), ("boca", "Boca"),
+                            ("peito", "Peito"), ("ombro", "Ombro"), ("cabeça", "Cabeça"), ("rosto", "Rosto")
+                        ]:
+                            if p_cand in desc_lower:
+                                ponto = nome_p
+                                break
+
+                        return {
+                            "configuracao_mao": [],
+                            "orientacao": orientacao,
+                            "ponto_articulacao": ponto,
+                            "movimento": [],
+                            "descricao_completa": desc_pt
+                        }
+            except Exception:
+                continue
+        return None
     def gerar_imagem(
         self,
         prompt: str,
