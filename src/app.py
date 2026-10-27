@@ -73,8 +73,12 @@ if 'pdf_config_mao' not in st.session_state:
         st.session_state.pdf_config_mao = None
 
 if 'gdrive_catalog' not in st.session_state:
-    link_pasta_az = "https://drive.google.com/drive/folders/1I7BccjSxTN_rDEPZQA7_Agd_c0RIxeoU?usp=sharing"
-    st.session_state.gdrive_catalog = GDriveCapovillaCatalog(link_pasta_az)
+    try:
+        link_pasta_az = "https://drive.google.com/drive/folders/1I7BccjSxTN_rDEPZQA7_Agd_c0RIxeoU?usp=sharing"
+        st.session_state.gdrive_catalog = GDriveCapovillaCatalog(link_pasta_az)
+    except Exception as e:
+        st.session_state.gdrive_catalog = None
+        st.error(f"Erro ao carregar conector do Drive: {e}")
 
 if 'parametros_extraidos' not in st.session_state:
     st.session_state.parametros_extraidos = None
