@@ -1,359 +1,309 @@
 """
-Módulo de extração e busca em PDFs do Dicionário Capovilla e Configurações de Mão
-Usa PyMuPDF (fitz) com lazy loading para eficiência de memória
+Extrator e Indexador Ultrarrápido (SQLite) para os PDFs do Capovilla e Configurações de Mão
 """
 import fitz  # PyMuPDF
+import sqlite3
 import re
-from typing import Optional, Dict, List, Tuple
+import unicodedata
 from pathlib import Path
 from PIL import Image
 import io
 
 
+def normalizar_texto(texto: str) -> str:
+    """Remove acentos e converte para minúsculas para buscas precisas"""
+    if not texto:
+        return ""
+    nfkd = unicodedata.normalize('NFKD', texto)
+    sem_acento = "".join([c for c in nfkd if not unicodedata.combining(c)])
+    return sem_acento.lower().strip()
+
+
 class PDFCapovillaExtractor:
-    """Extrator para o Dicionário Capovilla completo"""
-
-    def __init__(self, caminho_pdf: str = None):
-        # Se não especificado, usar caminho relativo ao projeto
-        if caminho_pdf is None:
-            caminho_pdf = "data/pdfs/Dicionario capovilla completo.pdf"
-
-        self.caminho_pdf = caminho_pdf
-        self.doc = None
-        self._verificar_arquivo()
-
-    def _verificar_arquivo(self):
-        """Verifica se o arquivo PDF existe"""
-        if not Path(self.caminho_pdf).exists():
-            raise FileNotFoundError(f"PDF não encontrado: {self.caminho_pdf}")
-
-    def abrir(self):
-        """Abre o documento PDF (lazy - só quando necessário)"""
-        if self.doc is None:
-            self.doc = fitz.open(self.caminho_pdf)
-        return self.doc
-
-    def fechar(self):
-        """Fecha o documento PDF"""
-        if self.doc:
-            self.doc.close()
-            self.doc = None
+    def __init__(self, pdf_path: str, db_path: str = "data/capovilla_index.db"):
+        self.pdf_path = str(pdf_path)
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.doc = fitz.open(self.pdf_path)
+        self._inicializar_banco()
 
     def get_total_paginas(self) -> int:
-        """Retorna o número total de páginas"""
-        self.abrir()
         return len(self.doc)
 
-    def renderizar_pagina(self, num_pagina: int, dpi: int = 150) -> Image.Image:
+    def _inicializar_banco(self):
+        """Cria a estrutura SQLite para busca instantânea"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS paginas (
+                pagina INTEGER PRIMARY KEY,
+                texto_completo TEXT,
+                texto_normalizado TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS verbetes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                termo TEXT,
+                termo_normalizado TEXT,
+                pagina INTEGER,
+                resumo TEXT
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_termo_norm ON verbetes(termo_normalizado)")
+        conn.commit()
+        conn.close()
+
+    def esta_indexado(self) -> bool:
+        """Verifica se o PDF já foi varrido e salvo no SQLite"""
+        if not self.db_path.exists():
+            return False
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM paginas")
+            count = cursor.fetchone()[0]
+            conn.close()
+            # Consideramos indexado se tiver pelo menos 90% das páginas salvas
+            return count >= int(self.get_total_paginas() * 0.9)
+        except Exception:
+            return False
+
+    def construir_indice(self, progress_callback=None):
         """
-        Renderiza uma página específica como imagem PIL
-
-        Args:
-            num_pagina: Número da página (1-indexed)
-            dpi: Resolução da imagem (default 150)
-
-        Returns:
-            Imagem PIL da página
+        Varre todas as páginas do PDF uma única vez, separando o que é
+        VERBETE PRINCIPAL do que é apenas texto comum da página.
         """
-        self.abrir()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM paginas")
+        cursor.execute("DELETE FROM verbetes")
 
-        # Ajustar para 0-indexed
-        pagina = self.doc[num_pagina - 1]
+        total = self.get_total_paginas()
 
-        # Renderizar com zoom baseado no DPI
-        zoom = dpi / 72  # 72 DPI é o padrão
-        mat = fitz.Matrix(zoom, zoom)
-        pix = pagina.get_pixmap(matrix=mat)
+        # Padrão Capovilla: "termo (sinal usado em:" ou "termo (inglês:"
+        padrao_verbete = re.compile(
+            r'([a-zA-Zà-úÀ-ÚçÇ\-\s]{2,35}?)\s*\((?:sinal usado em|ingl[êe]s\s*:)',
+            re.IGNORECASE
+        )
 
-        # Converter para PIL Image
-        img_data = pix.tobytes("png")
-        img = Image.open(io.BytesIO(img_data))
+        lote_paginas = []
+        lote_verbetes = []
 
-        return img
+        for idx in range(total):
+            num_pag = idx + 1
+            texto = self.doc[idx].get_text("text")
+            texto_norm = normalizar_texto(texto)
 
-    def extrair_texto_pagina(self, num_pagina: int) -> str:
+            lote_paginas.append((num_pag, texto, texto_norm))
+
+            # Identificar cabeçalhos de sinais na página
+            for match in padrao_verbete.finditer(texto):
+                termo_bruto = match.group(1).strip()
+                # Pega apenas a última linha caso tenha capturado sujeira antes
+                linhas_termo = [l.strip() for l in termo_bruto.split('\n') if l.strip()]
+                if linhas_termo:
+                    termo_limpo = linhas_termo[-1]
+                    if 1 < len(termo_limpo) <= 30:
+                        pos_inicio = max(0, match.start() - 10)
+                        pos_fim = min(len(texto), match.end() + 250)
+                        resumo = texto[pos_inicio:pos_fim].replace('\n', ' ')
+                        lote_verbetes.append((
+                            termo_limpo,
+                            normalizar_texto(termo_limpo),
+                            num_pag,
+                            resumo
+                        ))
+
+            if len(lote_paginas) >= 150 or num_pag == total:
+                cursor.executemany("INSERT OR REPLACE INTO paginas VALUES (?, ?, ?)", lote_paginas)
+                cursor.executemany(
+                    "INSERT INTO verbetes (termo, termo_normalizado, pagina, resumo) VALUES (?, ?, ?, ?)",
+                    lote_verbetes
+                )
+                conn.commit()
+                lote_paginas.clear()
+                lote_verbetes.clear()
+
+                if progress_callback:
+                    progress_callback(num_pag, total)
+
+        conn.close()
+
+    def buscar_termo(self, termo: str, max_resultados: int = 15) -> list:
         """
-        Extrai o texto de uma página específica
-
-        Args:
-            num_pagina: Número da página (1-indexed)
-
-        Returns:
-            Texto da página
+        Busca primeiro nos Verbetes Principais (alta precisão) e depois
+        nas menções gerais, sem repetir a mesma página.
         """
-        self.abrir()
-        pagina = self.doc[num_pagina - 1]
-        return pagina.get_text()
+        termo_norm = normalizar_texto(termo)
+        if not termo_norm:
+            return []
 
-    def buscar_termo(self, termo: str, max_resultados: int = 20) -> List[Dict]:
-        """
-        Busca um termo no dicionário
+        # Se ainda não estiver indexado, faz busca rápida nas páginas
+        if not self.esta_indexado():
+            return self._busca_fallback_sem_indice(termo, max_resultados)
 
-        Args:
-            termo: Palavra/sinal a buscar
-            max_resultados: Máximo de resultados a retornar
-
-        Returns:
-            Lista de dicionários com {pagina, texto_contexto}
-        """
-        self.abrir()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         resultados = []
-        termo_upper = termo.upper()
+        paginas_vistas = set()
 
-        # Buscar nas páginas (lazy - uma por vez)
-        for num_pagina in range(1, len(self.doc) + 1):
-            if len(resultados) >= max_resultados:
-                break
-
-            texto = self.extrair_texto_pagina(num_pagina)
-
-            # Verificar se o termo aparece no início de linha (verbete)
-            # Padrão: termo em maiúsculas ou negrito no início
-            if termo_upper in texto.upper():
-                # Extrair contexto (primeiras linhas)
-                linhas = texto.split('\n')
-                contexto = '\n'.join(linhas[:10])  # Primeiras 10 linhas
-
+        # 1. Busca Exata no Verbete Principal (Ex: "à toa")
+        cursor.execute("""
+            SELECT v.termo, v.pagina, p.texto_completo
+            FROM verbetes v
+            JOIN paginas p ON v.pagina = p.pagina
+            WHERE v.termo_normalizado = ?
+            ORDER BY v.pagina ASC
+        """, (termo_norm,))
+        for termo_enc, pag, txt in cursor.fetchall():
+            if pag not in paginas_vistas:
+                paginas_vistas.add(pag)
                 resultados.append({
-                    'pagina': num_pagina,
-                    'texto_contexto': contexto,
-                    'texto_completo': texto
+                    'pagina': pag,
+                    'tipo': f"🎯 Verbete Exato: '{termo_enc.upper()}'",
+                    'texto_completo': txt
                 })
 
+        # 2. Busca Parcial em Verbetes Principais (Começa com o termo)
+        if len(resultados) < max_resultados:
+            cursor.execute("""
+                SELECT v.termo, v.pagina, p.texto_completo
+                FROM verbetes v
+                JOIN paginas p ON v.pagina = p.pagina
+                WHERE v.termo_normalizado LIKE ?
+                ORDER BY length(v.termo_normalizado) ASC, v.pagina ASC
+                LIMIT ?
+            """, (f"{termo_norm}%", max_resultados))
+            for termo_enc, pag, txt in cursor.fetchall():
+                if pag not in paginas_vistas:
+                    paginas_vistas.add(pag)
+                    resultados.append({
+                        'pagina': pag,
+                        'tipo': f"📌 Verbete: '{termo_enc.upper()}'",
+                        'texto_completo': txt
+                    })
+
+        # 3. Busca no corpo do texto (apenas se ainda houver espaço na lista)
+        if len(resultados) < max_resultados:
+            restante = max_resultados - len(resultados)
+            cursor.execute("""
+                SELECT pagina, texto_completo
+                FROM paginas
+                WHERE texto_normalizado LIKE ?
+                ORDER BY pagina ASC
+                LIMIT ?
+            """, (f"%{termo_norm}%", restante + 10))
+            for pag, txt in cursor.fetchall():
+                if pag not in paginas_vistas and len(resultados) < max_resultados:
+                    paginas_vistas.add(pag)
+                    resultados.append({
+                        'pagina': pag,
+                        'tipo': "📄 Menção na página",
+                        'texto_completo': txt
+                    })
+
+        conn.close()
         return resultados
 
-    def extrair_parametros_sinal(self, texto_pagina: str) -> Optional[Dict]:
+    def _busca_fallback_sem_indice(self, termo: str, max_resultados: int) -> list:
+        """Caso o usuário busque antes de indexar"""
+        termo_norm = normalizar_texto(termo)
+        resultados = []
+        for idx in range(len(self.doc)):
+            txt = self.doc[idx].get_text("text")
+            if termo_norm in normalizar_texto(txt):
+                resultados.append({
+                    'pagina': idx + 1,
+                    'tipo': "📄 Página encontrada",
+                    'texto_completo': txt
+                })
+                if len(resultados) >= max_resultados:
+                    break
+        return resultados
+
+    def extrair_texto_pagina(self, numero_pagina: int) -> str:
+        idx = max(0, min(numero_pagina - 1, len(self.doc) - 1))
+        return self.doc[idx].get_text("text")
+
+    def renderizar_pagina(self, numero_pagina: int, zoom: float = 2.0) -> Image.Image:
+        idx = max(0, min(numero_pagina - 1, len(self.doc) - 1))
+        page = self.doc[idx]
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+        return Image.open(io.BytesIO(pix.tobytes("png")))
+
+    def extrair_parametros_sinal(self, texto: str, termo_foco: str = "") -> dict:
         """
-        Extrai os parâmetros do sinal do texto entre parênteses
-        Exemplo: "(Mão em B horizontal, palma para frente, dedos inclinados para a direita. Movê-la ligeiramente para a direita.)"
-
-        Args:
-            texto_pagina: Texto completo da página
-
-        Returns:
-            Dicionário com parâmetros extraídos
+        Extrai a descrição entre parênteses do sinal focado na página
+        Ex: (Mão em A, palma para a esquerda, dedo mínimo distendido...)
         """
-        # Regex para capturar texto entre parênteses (última ocorrência grande)
-        padrao = r'\(([^()]{50,}?)\)'
-        matches = re.findall(padrao, texto_pagina)
-
-        if not matches:
+        if not texto:
             return None
 
-        # Pegar a maior ocorrência (geralmente é a descrição do sinal)
-        descricao = max(matches, key=len)
+        texto_limpo = re.sub(r'\s+', ' ', texto)
+        descricao_foco = texto_limpo
 
-        # Extrair parâmetros
-        parametros = {
-            'descricao_completa': descricao,
-            'configuracao_mao': self._extrair_configuracao_mao(descricao),
-            'orientacao': self._extrair_orientacao(descricao),
-            'ponto_articulacao': self._extrair_ponto_articulacao(descricao),
-            'movimento': self._extrair_movimento(descricao)
+        # Se sabemos qual é o termo buscado, focamos no trecho a partir dele
+        if termo_foco:
+            padrao_pos = re.search(re.escape(termo_foco.strip()), texto_limpo, re.IGNORECASE)
+            if padrao_pos:
+                inicio = padrao_pos.start()
+                descricao_foco = texto_limpo[inicio:inicio + 1200]
+
+        # Tentar pegar a descrição anatômica entre parênteses típica do Capovilla
+        match_parenteses = re.search(
+            r'\(([^)]*(?:mão|mãos|palma|dedo|dedos|braço|queixo|testa|peito|ombro|boca)[^)]*)\)',
+            descricao_foco,
+            re.IGNORECASE
+        )
+
+        if match_parenteses:
+            desc_final = match_parenteses.group(1).strip()
+        else:
+            desc_final = descricao_foco[:600].strip()
+
+        # Inferência simples de orientação e ponto de articulação
+        desc_lower = desc_final.lower()
+        orientacao = "Palma para cima"
+        if "palma para baixo" in desc_lower:
+            orientacao = "Palma para baixo"
+        elif "palma para a frente" in desc_lower or "palma para frente" in desc_lower:
+            orientacao = "Palma para frente"
+        elif "palma para trás" in desc_lower or "palma para o corpo" in desc_lower:
+            orientacao = "Palma para trás"
+        elif "palma para a esquerda" in desc_lower or "palma para a direita" in desc_lower or "palma para dentro" in desc_lower:
+            orientacao = "Palma para dentro"
+
+        ponto = "Espaço neutro"
+        for p_cand, nome_p in [
+            ("queixo", "Queixo"), ("testa", "Testa"), ("boca", "Boca"),
+            ("peito", "Peito"), ("ombro", "Ombro"), ("cabeça", "Cabeça"), ("rosto", "Rosto")
+        ]:
+            if p_cand in desc_lower:
+                ponto = nome_p
+                break
+
+        return {
+            'configuracao_mao': [],
+            'orientacao': orientacao,
+            'ponto_articulacao': ponto,
+            'movimento': [],
+            'descricao_completa': desc_final
         }
-
-        return parametros
-
-    def _extrair_configuracao_mao(self, descricao: str) -> List[str]:
-        """Extrai configuração de mão da descrição"""
-        configs = []
-
-        # Padrões: "Mão em X", "Mãos em X", etc.
-        padrao = r'[Mm]ão(?:s)?\s+em\s+([A-Z])\b'
-        matches = re.findall(padrao, descricao)
-
-        for letra in matches:
-            configs.append(f"Mão em {letra}")
-
-        # Padrões adicionais
-        if "mão aberta" in descricao.lower():
-            configs.append("Mão aberta")
-        if "mão fechada" in descricao.lower():
-            configs.append("Mão fechada")
-
-        return list(set(configs)) if configs else ["Não identificada"]
-
-    def _extrair_orientacao(self, descricao: str) -> str:
-        """Extrai orientação da mão"""
-        descricao_lower = descricao.lower()
-
-        if "palma para cima" in descricao_lower:
-            return "Palma para cima"
-        elif "palma para baixo" in descricao_lower:
-            return "Palma para baixo"
-        elif "palma para frente" in descricao_lower or "palma para a frente" in descricao_lower:
-            return "Palma para frente"
-        elif "palma para trás" in descricao_lower or "palma para tras" in descricao_lower:
-            return "Palma para trás"
-        elif "palma para dentro" in descricao_lower:
-            return "Palma para dentro"
-        elif "palma para fora" in descricao_lower:
-            return "Palma para fora"
-
-        # Dedos
-        if "dedos para cima" in descricao_lower:
-            return "Dedos para cima"
-        elif "dedos para baixo" in descricao_lower:
-            return "Dedos para baixo"
-
-        return "Não identificada"
-
-    def _extrair_ponto_articulacao(self, descricao: str) -> str:
-        """Extrai ponto de articulação"""
-        descricao_lower = descricao.lower()
-
-        pontos = {
-            "testa": "Testa",
-            "cabeça": "Cabeça",
-            "rosto": "Cabeça",
-            "olho": "Olhos",
-            "nariz": "Nariz",
-            "boca": "Boca",
-            "orelha": "Orelha",
-            "queixo": "Boca",
-            "pescoço": "Pescoço",
-            "ombro": "Ombro",
-            "peito": "Peito",
-            "barriga": "Barriga",
-            "braço": "Braço",
-            "cotovelo": "Cotovelo",
-            "pulso": "Pulso",
-            "frente do corpo": "À frente do corpo",
-            "lado do corpo": "Ao lado do corpo",
-            "espaço neutro": "Espaço neutro",
-        }
-
-        for chave, valor in pontos.items():
-            if chave in descricao_lower:
-                return valor
-
-        return "Espaço neutro"
-
-    def _extrair_movimento(self, descricao: str) -> List[str]:
-        """Extrai tipo de movimento"""
-        movimentos = []
-        descricao_lower = descricao.lower()
-
-        padroes_movimento = {
-            "para frente": "Para frente",
-            "para trás": "Para trás",
-            "para tras": "Para trás",
-            "para cima": "Para cima",
-            "para baixo": "Para baixo",
-            "para a direita": "Para direita",
-            "para direita": "Para direita",
-            "para a esquerda": "Para esquerda",
-            "para esquerda": "Para esquerda",
-            "circular": "Circular",
-            "movê-la": "Para frente",
-            "tocar": "Tocar",
-            "esfregar": "Esfregar",
-            "balançar": "Balançar",
-            "tremular": "Tremular",
-        }
-
-        for padrao, movimento in padroes_movimento.items():
-            if padrao in descricao_lower:
-                movimentos.append(movimento)
-
-        return list(set(movimentos)) if movimentos else ["Sem movimento"]
 
 
 class PDFConfiguracaoMaoExtractor:
-    """Extrator para o PDF de Configurações de Mão"""
+    def __init__(self, pdf_path: str):
+        self.pdf_path = str(pdf_path)
+        self.doc = fitz.open(self.pdf_path)
 
-    def __init__(self, caminho_pdf: str = None):
-        # Se não especificado, usar caminho relativo ao projeto
-        if caminho_pdf is None:
-            caminho_pdf = "data/pdfs/configuraçao de mao.pdf"
+    def get_total_paginas(self) -> int:
+        return len(self.doc)
 
-        self.caminho_pdf = caminho_pdf
-        self.doc = None
-        self._verificar_arquivo()
-
-    def _verificar_arquivo(self):
-        """Verifica se o arquivo PDF existe"""
-        if not Path(self.caminho_pdf).exists():
-            raise FileNotFoundError(f"PDF não encontrado: {self.caminho_pdf}")
-
-    def abrir(self):
-        """Abre o documento PDF"""
-        if self.doc is None:
-            self.doc = fitz.open(self.caminho_pdf)
-        return self.doc
-
-    def fechar(self):
-        """Fecha o documento PDF"""
-        if self.doc:
-            self.doc.close()
-            self.doc = None
-
-    def extrair_configuracao(self, letra: str) -> Optional[Dict]:
-        """
-        Extrai a descrição detalhada de uma configuração de mão
-
-        Args:
-            letra: Letra da configuração (A-Z)
-
-        Returns:
-            Dicionário com descrição e imagem
-        """
-        self.abrir()
-
-        # Buscar a letra no documento
-        for num_pagina in range(len(self.doc)):
-            pagina = self.doc[num_pagina]
-            texto = pagina.get_text()
-
-            # Procurar por padrões como "Mão em A", "Configuração A", etc.
-            if f"mão em {letra.upper()}" in texto.lower() or f"configuração {letra.upper()}" in texto.lower():
-                return {
-                    'letra': letra.upper(),
-                    'pagina': num_pagina + 1,
-                    'descricao': texto[:500],  # Primeiros 500 caracteres
-                    'texto_completo': texto
-                }
-
-        return None
-
-    def renderizar_pagina_configuracao(self, letra: str, dpi: int = 150) -> Optional[Image.Image]:
-        """Renderiza a página da configuração específica"""
-        info = self.extrair_configuracao(letra)
-        if info:
-            pagina = self.doc[info['pagina'] - 1]
-            zoom = dpi / 72
-            mat = fitz.Matrix(zoom, zoom)
-            pix = pagina.get_pixmap(matrix=mat)
-            img_data = pix.tobytes("png")
-            return Image.open(io.BytesIO(img_data))
-        return None
-
-
-# Dicionário de Configurações de Mão Detalhadas (para o prompt engine)
-CONFIGURACOES_MAO_DETALHADAS = {
-    "Mão em A": "Mão fechada com o polegar ao lado do indicador, formando um punho com o polegar para fora.",
-    "Mão em B": "Mão aberta com dedos juntos e estendidos, polegar cruzado sobre a palma.",
-    "Mão em C": "Mão em formato de 'C', com todos os dedos curvados e separados do polegar.",
-    "Mão em D": "Indicador estendido apontando para cima, demais dedos fechados tocando o polegar.",
-    "Mão em E": "Mão fechada com dedos dobrados sobre a palma e polegar sobre os dedos.",
-    "Mão em F": "Polegar e indicador formando um círculo (como 'OK'), demais dedos estendidos.",
-    "Mão em G": "Indicador e polegar estendidos horizontalmente, demais dedos fechados.",
-    "Mão em H": "Indicador e médio estendidos juntos horizontalmente, demais dedos fechados.",
-    "Mão em I": "Mínimo (dedinho) estendido, demais dedos fechados com polegar cruzado.",
-    "Mão em L": "Indicador e polegar formando 'L', demais dedos fechados.",
-    "Mão em M": "Três dedos (indicador, médio e anelar) sobre o polegar, mínimo fechado.",
-    "Mão em N": "Indicador e médio sobre o polegar, demais dedos fechados.",
-    "Mão em O": "Dedos curvados formando círculo, pontas dos dedos tocando o polegar.",
-    "Mão em P": "Indicador e médio estendidos para baixo, polegar entre eles, demais dedos fechados.",
-    "Mão em Q": "Polegar e indicador apontando para baixo, demais dedos fechados.",
-    "Mão em R": "Indicador e médio cruzados, demais dedos fechados.",
-    "Mão em S": "Mão fechada em punho com polegar sobre os dedos.",
-    "Mão em T": "Polegar entre indicador e médio, demais dedos fechados.",
-    "Mão em U": "Indicador e médio estendidos juntos para cima, demais dedos fechados.",
-    "Mão em V": "Indicador e médio estendidos separados (formato 'V'), demais dedos fechados.",
-    "Mão em W": "Indicador, médio e anelar estendidos separados, polegar e mínimo fechados.",
-    "Mão em X": "Indicador dobrado em gancho, demais dedos fechados.",
-    "Mão em Y": "Polegar e mínimo estendidos, demais dedos fechados.",
-    "Mão aberta": "Todos os dedos estendidos e separados, palma visível.",
-    "Mão fechada": "Todos os dedos dobrados formando um punho fechado."
-}
+    def renderizar_pagina(self, numero_pagina: int, zoom: float = 2.0) -> Image.Image:
+        idx = max(0, min(numero_pagina - 1, len(self.doc) - 1))
+        page = self.doc[idx]
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+        return Image.open(io.BytesIO(pix.tobytes("png")))
