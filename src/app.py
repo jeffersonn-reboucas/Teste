@@ -3,7 +3,6 @@ Interface Streamlit para Libras Visual Builder
 Integrado com: Google Gemini API, Replicate (InstantCharacter), Drive Capovilla e SQLite.
 """
 import streamlit as st
-import os
 from pathlib import Path
 from datetime import datetime
 from PIL import Image
@@ -19,14 +18,7 @@ from catalog import CatalogoSinais
 from pdf_extractor import PDFCapovillaExtractor, PDFConfiguracaoMaoExtractor
 from pdf_manager import PDFManager
 from gdrive_signals import GDriveCapovillaCatalog
-
-
-st.set_page_config(
-    page_title="Libras Visual Builder",
-    page_icon="🤟",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+from st_cropper import st_cropper  # Novo import para recorte interativo
 
 # ============================================================================
 # INICIALIZAÇÃO DO SESSION STATE
@@ -93,7 +85,6 @@ if 'mostrar_fallback_free' not in st.session_state:
 
 if 'erro_geracao_msg' not in st.session_state:
     st.session_state.erro_geracao_msg = ""
-
 
 # ============================================================================
 # FUNÇÕES AUXILIARES
@@ -358,30 +349,32 @@ def main():
         if st.session_state.imagem_ref_path and os.path.exists(st.session_state.imagem_ref_path):
             st.image(st.session_state.imagem_ref_path, caption=f"Referência: {st.session_state.termo_atual}", use_container_width=True)
 
-            with st.expander("✂️ Recortar Sinal", expanded=False):
-                img_orig = Image.open(st.session_state.imagem_ref_path)
-                larg, alt = img_orig.size
-                c1, c2 = st.columns(2)
-                with c1:
-                    topo = st.slider("Topo (%)", 0, 90, 0)
-                    esq = st.slider("Esq (%)", 0, 90, 0)
-                with c2:
-                    base = st.slider("Base (%)", 10, 100, 100)
-                    direita = st.slider("Dir (%)", 10, 100, 100)
-                
-                if base > topo and direita > esq:
-                    caixa = (int(larg*esq/100), int(alt*topo/100), int(larg*direita/100), int(alt*base/100))
-                    st.image(img_orig.crop(caixa), caption="Prévia", use_container_width=True)
-                    if st.button("✅ Aplicar Recorte"):
-                        caminho_crop = "assets/referencias/recorte_focado_atual.png"
-                        img_orig.crop(caixa).save(caminho_crop)
-                        st.session_state.imagem_ref_path = caminho_crop
-                        st.rerun()
+        with st.expander("✂️ Recortar Sinal", expanded=False):
+            img_orig = Image.open(st.session_state.imagem_ref_path)
+            cropped = st_cropper(
+                img_orig,
+                x_margin=0,
+                y_margin=0,
+                tool="crop",
+                aspect_ratio=None,
+                background_color="#000000",
+                line_color="#FF0000",
+                box_color="#00FF00",
+                show_original=False,
+                show_origin=False,
+                show_axes=False,
+                show_label=False,
+            )
+            if cropped:
+                caminho_crop = "assets/referencias/recorte_focado_atual.png"
+                cropped.save(caminho_crop, format="PNG")
+                st.session_state.imagem_ref_path = caminho_crop
+                st.rerun()
 
         st.divider()
         st.subheader("🔧 Parâmetros (Opcional)")
         params = st.session_state.parametros_extraidos or {}
-        
+
         termo = st.text_input("Nome do Sinal", value=st.session_state.termo_atual)
         st.session_state.termo_atual = termo
 
@@ -416,11 +409,11 @@ def main():
             if uploaded_char:
                 nome_personagem = st.text_input("Nome", value="Jefferson")
                 imagem_personagem_path = f"assets/personagens/{nome_personagem or 'temp_char'}.png"
-                
+
                 # BUG FIX: Converte para PNG real antes de salvar
                 img_pil = Image.open(uploaded_char).convert("RGB")
                 img_pil.save(imagem_personagem_path, format="PNG")
-                
+
                 st.success(f"✅ Salvo: {nome_personagem}")
                 st.image(imagem_personagem_path, use_container_width=True)
 
@@ -433,7 +426,7 @@ def main():
         tem_ref = bool(st.session_state.imagem_ref_path and os.path.exists(st.session_state.imagem_ref_path))
         tem_char = bool(imagem_personagem_path and os.path.exists(imagem_personagem_path))
         tem_termo = bool(termo.strip() or observacoes.strip())
-        
+
         faltando = []
         if not tem_ref: faltando.append("Referência")
         if not tem_char: faltando.append("Personagem")
@@ -499,7 +492,7 @@ def main():
                     with st.spinner("🎭 Aplicando o sinal no seu personagem (aguarde ~30s)..."):
                         prompt = st.session_state.ultimo_prompt or construir_prompt_atual()
                         nome_arquivo = f"instant_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                        
+
                         ai_gen = AIGenerator(
                             provider="smart-router",
                             config={"replicate_key": chave_rep_final, "priority_order": ["replicate"]}
@@ -517,6 +510,13 @@ def main():
                             st.session_state.imagem_gerada = caminho_saida
                         else:
                             st.error(f"❌ Falha no InstantCharacter: {msg}")
+
+            # --- Manual fallback UI ---
+            st.subheader("🛠️ Modo Manual (Gerar no ChatGPT / Gemini Web)")
+            if st.button("Abrir Prompt Completo"):
+                prompt_final = construir_prompt_atual()
+                st.code(prompt_final, language="text")
+                st.markdown("**Instruções:**\n1. Copie o prompt abaixo.\n2. Abra o site do ChatGPT ou Gemini.\n3. Faça upload da Imagem de Referência e do Personagem.\n4. Cole o prompt e gere a imagem.")
 
         # EXIBE A IMAGEM FINAL
         if st.session_state.imagem_gerada and os.path.exists(st.session_state.imagem_gerada):
