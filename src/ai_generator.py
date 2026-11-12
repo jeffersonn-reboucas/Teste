@@ -13,7 +13,6 @@ import time
 from pathlib import Path
 from PIL import Image
 
-
 class SmartAIRouter:
     def __init__(self, config: dict = None):
         self.config = config or {}
@@ -317,7 +316,6 @@ class AIGenerator:
     def _gerar_com_replicate(self, api_key: str, prompt: str, img_ref: str, img_char: str, caminho_saida: str) -> tuple:
         """
         Gera imagem usando a API do Replicate (Modelo InstantCharacter).
-        Usa a biblioteca requests em vez do SDK do Replicate para manter o código leve.
         """
         if not img_ref or not img_char:
             return False, "As duas imagens (Referência e Personagem) são obrigatórias para o InstantCharacter."
@@ -325,47 +323,42 @@ class AIGenerator:
         try:
             b64_ref, mime_ref = self._encode_image_b64(img_ref)
             b64_char, mime_char = self._encode_image_b64(img_char)
-            
-            # O Replicate aceita imagens no formato Data URI
+
             ref_data_uri = f"data:{mime_ref};base64,{b64_ref}"
             char_data_uri = f"data:{mime_char};base64,{b64_char}"
 
-            # Endpoint da API do Replicate para o InstantCharacter
             url = "https://api.replicate.com/v1/models/bytedance/instant-character/predictions"
+
+            # CORREÇÃO: O prefixo deve ser 'Bearer', não 'Token'
             headers = {
-                "Authorization": f"Token {api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
             payload = {
                 "input": {
                     "prompt": prompt,
-                    "subject_image": char_data_uri,   # Item B (Seu personagem)
-                    "control_image": ref_data_uri,    # Item A (O sinal)
+                    "subject_image": char_data_uri,
+                    "control_image": ref_data_uri,
                     "width": 1024,
                     "height": 1024
                 }
             }
 
-            # 1. Cria a predição
             resp = requests.post(url, headers=headers, json=payload, timeout=30)
             if resp.status_code not in (200, 201):
                 return False, f"Erro API Replicate (HTTP {resp.status_code}): {resp.text[:100]}"
 
             prediction = resp.json()
             get_url = prediction.get("urls", {}).get("get")
-            
-            if not get_url:
-                return False, "Não foi possível obter URL de polling no Replicate."
 
-            # 2. Polling (Aguardar a geração da imagem)
-            # O Replicate demora cerca de 10 a 30 segundos para gerar
-            for _ in range(30): # Tentar por 60 segundos (30 * 2s)
+            for _ in range(30):
                 time.sleep(2)
+                # O polling também precisa do cabeçalho correto
                 poll_resp = requests.get(get_url, headers=headers, timeout=15)
                 if poll_resp.status_code == 200:
                     poll_data = poll_resp.json()
                     status = poll_data.get("status")
-                    
+
                     if status == "succeeded":
                         output = poll_data.get("output")
                         if isinstance(output, list) and len(output) > 0:
@@ -374,21 +367,21 @@ class AIGenerator:
                             img_url = output
                         else:
                             return False, "Formato de saída do Replicate desconhecido."
-                        
-                        # 3. Baixa a imagem final
+
                         img_resp = requests.get(img_url, timeout=30)
                         if img_resp.status_code == 200:
                             with open(caminho_saida, "wb") as f:
                                 f.write(img_resp.content)
                             return True, "Gerado via InstantCharacter (Replicate)"
+
                         return False, "Falha ao baixar imagem gerada do Replicate."
-                        
+
                     elif status == "failed":
                         erro_msg = poll_data.get("error", "Motivo desconhecido")
                         return False, f"Replicate falhou: {erro_msg}"
-            
+
             return False, "Timeout: O Replicate demorou muito para responder."
-            
+
         except Exception as e:
             return False, f"Erro de conexão Replicate: {str(e)[:100]}"
 
