@@ -9,7 +9,6 @@ import re
 # Sugestão: Mova este dicionário para o models.py no futuro para desacoplar.
 from pdf_extractor import CONFIGURACOES_MAO_DETALHADAS
 
-
 class PromptEngine:
     """Gera prompts técnicos para fusão de poses de Libras em personagens 2D"""
 
@@ -17,10 +16,10 @@ class PromptEngine:
         self.modo_otimizado = modo_otimizado  # RTK: Token Saver
 
         # Style Lock: Trava de Estilo 2D Pedagógico
-        self.style_lock = "2D flat vector illustration, clean linework, educational sign language reference, pedagogical clarity, solid colors, white background, front view, centered composition."
+        self.style_lock = "2D flat vector illustration, clean linework, educational sign language reference, pedagogical clarity, solid colors, white background, front view, centered composition, 5 distinct fingers clearly separated, no missing or extra fingers, maintain character's visual identity (curly dark hair, round glasses, short goatee, black v-neck t-shirt, flat cel-shaded vector style)."
 
         # Anatomy Lock: Trava de Anatomia Precisa
-        self.anatomy_lock = "CRITICAL: exact hand configuration, precise finger positions, anatomically correct, maintain character's visual identity 100%."
+        self.anatomy_lock = "CRITICAL: exact hand configuration, precise 5-finger positions, each finger clearly separated, anatomically correct, maintain character's visual identity 100% (curly dark hair, round glasses, short goatee, black v-neck t-shirt, flat cel-shaded vector style)."
 
     def _formatar_lista(self, itens: List[str]) -> str:
         """Formata lista de itens para o prompt"""
@@ -66,7 +65,7 @@ class PromptEngine:
         }
         for antigo, novo in substituicoes.items():
             texto = texto.replace(antigo, novo)
-        
+
         texto = re.sub(r' {2,}', ' ', texto)
         return texto.strip()
 
@@ -88,7 +87,7 @@ class PromptEngine:
         Como ele já recebe o Personagem (Item B), não perdemos tokens descrevendo o rosto.
         """
         configs_detalhadas = self._detalhar_configuracoes(configuracao_mao)
-        
+
         # Monta o prompt em inglês (melhor performance no InstantCharacter/Flux)
         prompt = (
             f"2D flat vector illustration of the character performing the exact pose shown in the control image. "
@@ -98,10 +97,11 @@ class PromptEngine:
             f"Movement: {self._formatar_lista(movimento)}. "
             f"Orientation: {orientacao}. "
             f"Facial expression: {self._formatar_lista(expressao)}. "
+            f"Ensure exactly 5 distinct fingers are shown, each finger clearly separated, and preserve the character’s exact appearance (curly dark hair, round glasses, short goatee, black v-neck t-shirt, flat cel-shaded vector style). "
             f"Keep the character's exact face and style from the subject image. "
             f"White background, clean lines, educational flashcard."
         )
-        
+
         if observacoes:
             prompt += f" Additional visual notes: {observacoes[:150]}"
 
@@ -110,7 +110,6 @@ class PromptEngine:
         prompt += f"\nANATOMY LOCK: {self.anatomy_lock}"
 
         return self._otimizar_tokens(prompt)
-
 
     # =========================================================================
     # MÉTODOS ANTIGOS: Mantidos para o Gemini Multimodal (Caso use como fallback)
@@ -129,7 +128,7 @@ class PromptEngine:
         configs_detalhadas = self._detalhar_configuracoes(configuracao_mao)
 
         prompt_parametros = f"""
-TAREFA: Gerar ilustração do sinal "{termo.upper()}".
+TAREFA: Gerar ilustração do sinal "{termo.upper()}.
 - Configuração de Mão: {configs_detalhadas}
 - Ponto de Articulação: {ponto_articulacao}
 - Movimento: {self._formatar_lista(movimento)}
@@ -147,7 +146,7 @@ INSTRUÇÕES CRÍTICAS:
 4. A configuração de mão deve ser IDÊNTICA à referência.
 5. O estilo visual deve ser 100% fiel ao personagem original.
 """
-        return (prompt_parametros + instrucoes_execucao + 
+        return (prompt_parametros + instrucoes_execucao +
                 f"\nSTYLE: {self.style_lock}\nANATOMY: {self.anatomy_lock}")
 
     def gerar_prompt_otimizado(self, **kwargs) -> str:
@@ -155,7 +154,7 @@ INSTRUÇÕES CRÍTICAS:
         termo = kwargs.get('termo', '')
         configuracao_mao = kwargs.get('configuracao_mao', [])
         ponto_articulacao = kwargs.get('ponto_articulacao', '')
-        
+
         return self.gerar_prompt_instant_character(
             termo=termo,
             configuracao_mao=configuracao_mao,

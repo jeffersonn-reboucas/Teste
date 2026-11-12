@@ -122,8 +122,8 @@ class AIGenerator:
                             "configuracao_mao": [],
                             "orientacao": orientacao,
                             "ponto_articulacao": ponto,
-                            "movimento": [],
-                            "descricao_completa": desc_pt
+            "movimento": [],
+            "descricao_completa": desc_pt
                         }
             except Exception:
                 continue
@@ -252,7 +252,8 @@ class AIGenerator:
             "Generate a single clean 2D vector educational flashcard illustration on a solid white background. "
             "Draw ONLY the waist-up view of the male teacher character from CHARACTER SHEET performing the exact "
             "Brazilian Sign Language (Libras) gesture shown in SIGN POSE REFERENCE. "
-            "High anatomical precision on all 5 fingers, clean black outlines, flat cel shading, didactic movement arrows. "
+            "The character has curly dark hair, round glasses, short goatee, black v-neck t-shirt, flat cel-shaded vector style. "
+            "High anatomical precision on exactly 5 distinct fingers, each finger clearly separated, no missing or extra fingers, clean black outlines, flat cel shading, didactic movement arrows. "
             "Do NOT draw multiple panels, grids, text labels, or decorative frames.\n\n"
             f"Sign details: {prompt[:700]}"
         )
